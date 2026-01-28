@@ -9,6 +9,29 @@ import (
 	"github.com/arc-language/upkg/pkg/backend"
 )
 
+// Re-export backend types for convenience
+type (
+	BackendType     = backend.BackendType
+	Package         = backend.Package
+	PackageInfo     = backend.PackageInfo
+	DownloadOptions = backend.DownloadOptions
+	Config          = backend.Config
+	NixConfig       = backend.NixConfig
+	BrewConfig      = backend.BrewConfig
+)
+
+// Re-export backend constants
+const (
+	BackendNix  = backend.BackendNix
+	BackendBrew = backend.BackendBrew
+	BackendAuto = backend.BackendAuto
+)
+
+// DefaultConfig returns a configuration with sensible defaults
+func DefaultConfig() *Config {
+	return backend.DefaultConfig()
+}
+
 // Manager is the universal package manager
 type Manager struct {
 	backend backend.Backend

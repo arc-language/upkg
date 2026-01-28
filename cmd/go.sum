@@ -1,0 +1,6 @@
+github.com/arc-language/upkg v0.0.0-20260128193904-4c452fd62c9a h1:nD11W7Ez/0btve+1MvfwewfpKXCt2wGOnvdsXapuTLE=
+github.com/arc-language/upkg v0.0.0-20260128193904-4c452fd62c9a/go.mod h1:IG4Ujj4VVEKGv3/x6+s19wq5jDZoYrB5YupCxLB0TOc=
+github.com/ulikunitz/xz v0.5.15 h1:9DNdB5s+SgV3bQ2ApL10xRc35ck0DuIX/isZvIk+ubY=
+github.com/ulikunitz/xz v0.5.15/go.mod h1:nbz6k7qbPmH4IRqmfOplQw/tblSgqTqBwxkY0oWt/14=
+zombiezen.com/go/nix v0.0.0-20250514174927-d97ab08b45de h1:X37qVOQIIuiEfWf+P4bMpaVPKr9mdwmj2sj3dj7UY18=
+zombiezen.com/go/nix v0.0.0-20250514174927-d97ab08b45de/go.mod h1:3/4h+nWUdD9F6De1g7zBvgn4RyryS+mnK5JiW2JHRe8=
