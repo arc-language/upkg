@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img src="./.github/upkg_logo.jpeg" alt="upkg" width="200px">
+  <img src="./.github/upkg_logo.jpg" alt="upkg" width="200px">
 </h1>
 
 <h4 align="center">Universal Package Manager<br>One API. Multiple backends.</h4>
