@@ -3,6 +3,7 @@ package nix
 
 import (
 	"bufio"
+	"bytes"
 	"compress/bzip2"
 	"context"
 	"crypto/sha256"
@@ -19,15 +20,6 @@ import (
 	"github.com/ulikunitz/xz"
 	"zombiezen.com/go/nix/nar"
 )
-
-// hydraBuildInfo represents the JSON response from Hydra
-type hydraBuildInfo struct {
-	ID           int `json:"id"`
-	BuildStatus  int `json:"buildstatus"` // 0 = succeeded
-	Buildoutputs map[string]struct {
-		Path string `json:"path"`
-	} `json:"buildoutputs"`
-}
 
 // NewPackageManager creates a new Nix package manager
 func NewPackageManager(cfg *Config) *PackageManager {
@@ -72,7 +64,7 @@ func NewPackageManager(cfg *Config) *PackageManager {
 	return pm
 }
 
-// ResolvePackageName queries Hydra to find all outputs for a package.
+// ResolvePackageName queries search.nixos.org Elasticsearch API to find all outputs for a package.
 // Returns: (map[outputName]storeHash, nameWithVersion, error)
 func (pm *PackageManager) ResolvePackageName(ctx context.Context, packageName string, platform Platform) (map[string]string, string, error) {
 	if platform == "" {
@@ -83,73 +75,113 @@ func (pm *PackageManager) ResolvePackageName(ctx context.Context, packageName st
 		}
 	}
 
-	url := fmt.Sprintf("https://hydra.nixos.org/job/nixos/trunk-combined/nixpkgs.%s.%s/latest", packageName, platform)
-	pm.logger.Printf("Resolving package '%s' via Hydra API: %s", packageName, url)
+	// Use search.nixos.org Elasticsearch API
+	channel := "nixos-unstable" // Could make this configurable via Config
+	searchURL := fmt.Sprintf("https://search.nixos.org/%s/_search", channel)
+	pm.logger.Printf("Resolving package '%s' via search.nixos.org API: %s", packageName, searchURL)
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, "", fmt.Errorf("creating hydra request: %w", err)
+	// Build Elasticsearch query
+	query := map[string]interface{}{
+		"query": map[string]interface{}{
+			"bool": map[string]interface{}{
+				"must": []map[string]interface{}{
+					{"term": map[string]interface{}{"type": "package"}},
+					{"term": map[string]interface{}{"package_system": string(platform)}},
+				},
+				"should": []map[string]interface{}{
+					{"match": map[string]interface{}{
+						"package_attr_name": map[string]interface{}{
+							"query": packageName,
+							"boost": 3,
+						},
+					}},
+					{"match": map[string]interface{}{
+						"package_pname": map[string]interface{}{
+							"query": packageName,
+							"boost": 2,
+						},
+					}},
+				},
+				"minimum_should_match": 1,
+			},
+		},
+		"size": 1, // Get the best match
 	}
-	req.Header.Set("Accept", "application/json")
+
+	// Marshal query to JSON
+	jsonData, err := json.Marshal(query)
+	if err != nil {
+		return nil, "", fmt.Errorf("marshaling query: %w", err)
+	}
+
+	// Create request
+	req, err := http.NewRequestWithContext(ctx, "POST", searchURL, bytes.NewReader(jsonData))
+	if err != nil {
+		return nil, "", fmt.Errorf("creating search request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", pm.client.userAgent)
 
+	// Execute request
 	resp, err := pm.client.httpClient.Do(req)
 	if err != nil {
-		return nil, "", fmt.Errorf("hydra request failed: %w", err)
+		return nil, "", fmt.Errorf("search request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("package '%s' not found on Hydra for platform '%s' (status: %d)", packageName, platform, resp.StatusCode)
+		return nil, "", fmt.Errorf("search API returned status %d", resp.StatusCode)
 	}
 
-	var buildInfo hydraBuildInfo
-	if err := json.NewDecoder(resp.Body).Decode(&buildInfo); err != nil {
-		return nil, "", fmt.Errorf("parsing hydra response: %w", err)
+	// Parse response
+	var result struct {
+		Hits struct {
+			Total struct {
+				Value int `json:"value"`
+			} `json:"total"`
+			Hits []struct {
+				Source struct {
+					PackageAttrName string            `json:"package_attr_name"`
+					PackagePname    string            `json:"package_pname"`
+					PackageVersion  string            `json:"package_version"`
+					PackageOutputs  map[string]string `json:"package_outputs"`
+				} `json:"_source"`
+			} `json:"hits"`
+		} `json:"hits"`
 	}
 
-	if buildInfo.BuildStatus != 0 {
-		pm.logger.Printf("⚠️  Warning: Latest build for '%s' has status %d (might be failed)", packageName, buildInfo.BuildStatus)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, "", fmt.Errorf("parsing search response: %w", err)
 	}
 
-	if len(buildInfo.Buildoutputs) == 0 {
-		return nil, "", fmt.Errorf("no outputs found in hydra response")
+	if len(result.Hits.Hits) == 0 {
+		return nil, "", fmt.Errorf("package '%s' not found for platform '%s'", packageName, platform)
 	}
 
-	// Collect all outputs (bin, dev, lib, out, etc.)
+	hit := result.Hits.Hits[0].Source
+	pm.logger.Printf("Found package: %s (v%s)", hit.PackageAttrName, hit.PackageVersion)
+
+	// Extract store hashes from full paths
+	// Path format: /nix/store/<hash>-<name>-<version>[-<output>]
 	outputs := make(map[string]string)
-	var commonNameVersion string
-
-	for outputName, outputData := range buildInfo.Buildoutputs {
-		path := outputData.Path
-		// Path format: /nix/store/<hash>-<name>-<version>[-<output>]
-		parts := strings.Split(strings.TrimPrefix(path, "/nix/store/"), "-")
-		if len(parts) < 2 {
-			pm.logger.Printf("Skipping invalid path format: %s", path)
-			continue
-		}
-
-		hash := parts[0]
-		outputs[outputName] = hash
-
-		// Attempt to extract the base name (name-version) from the "out" or first available path
-		// We want "gcc-13.2.0" not "gcc-13.2.0-bin"
-		if commonNameVersion == "" || outputName == "out" {
-			// Join everything after hash
-			rest := strings.Join(parts[1:], "-")
-			// If it ends with the output name (e.g. -bin), strip it, unless it's "out" which sometimes isn't appended
-			suffix := "-" + outputName
-			if outputName != "out" && strings.HasSuffix(rest, suffix) {
-				rest = strings.TrimSuffix(rest, suffix)
-			}
-			commonNameVersion = rest
+	for outputName, storePath := range hit.PackageOutputs {
+		// Parse "/nix/store/hash-name-version" to get just "hash"
+		pathWithoutPrefix := strings.TrimPrefix(storePath, "/nix/store/")
+		parts := strings.SplitN(pathWithoutPrefix, "-", 2)
+		if len(parts) > 0 && parts[0] != "" {
+			outputs[outputName] = parts[0]
+			pm.logger.Printf("  Output '%s': %s", outputName, parts[0])
 		}
 	}
 
-	pm.logger.Printf("✓ Resolved '%s' to %d outputs: %v", packageName, len(outputs), reflectKeys(outputs))
-	pm.logger.Printf("  Base Name: %s", commonNameVersion)
+	if len(outputs) == 0 {
+		return nil, "", fmt.Errorf("no valid outputs found for package '%s'", packageName)
+	}
 
-	return outputs, commonNameVersion, nil
+	nameVersion := fmt.Sprintf("%s-%s", hit.PackagePname, hit.PackageVersion)
+	pm.logger.Printf("✓ Resolved '%s' to %d outputs", packageName, len(outputs))
+
+	return outputs, nameVersion, nil
 }
 
 // helper to print keys
@@ -195,13 +227,13 @@ func (pm *PackageManager) Download(ctx context.Context, name, version string, op
 		}
 	} else {
 		// Auto-resolve mode: fetch all outputs
-		pm.logger.Printf("StoreHash not provided. Attempting to auto-resolve full package: %s", name)
+		pm.logger.Printf("StoreHash not provided. Attempting to auto-resolve package: %s", name)
 		resolvedOutputs, resolvedName, err := pm.ResolvePackageName(ctx, name, opts.Platform)
 		if err != nil {
 			return fmt.Errorf("resolving package name: %w", err)
 		}
 		downloads = resolvedOutputs
-		
+
 		if version == "" {
 			folderName = resolvedName
 		} else {
@@ -232,7 +264,7 @@ func (pm *PackageManager) Download(ctx context.Context, name, version string, op
 
 	for outputName, hash := range downloads {
 		pm.logger.Printf("--- Processing output: %s (%s) ---", outputName, hash)
-		
+
 		// A. Get Metadata
 		narInfo, err := pm.GetNARInfo(ctx, hash)
 		if err != nil {

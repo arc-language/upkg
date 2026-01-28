@@ -3,7 +3,7 @@ module app
 go 1.25.6
 
 require (
-	github.com/arc-language/upkg v0.0.0-20260128193904-4c452fd62c9a // indirect
+	github.com/arc-language/upkg v0.0.0-20260128194307-a65f9485ab87 // indirect
 	github.com/ulikunitz/xz v0.5.15 // indirect
 	zombiezen.com/go/nix v0.0.0-20250514174927-d97ab08b45de // indirect
 )
