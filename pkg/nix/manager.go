@@ -157,10 +157,10 @@ func (pm *PackageManager) Download(ctx context.Context, attribute string, opts *
 
 	pm.logger.Printf("Downloading %d output(s): %v", len(outputsToDownload), getKeys(outputsToDownload))
 
-	// 4. Create target directory (merge all outputs into one folder)
-	targetDir := filepath.Join(pm.config.InstallPath, pkg.NameVersion)
+	// 4. Create base directory
+	baseDir := filepath.Join(pm.config.InstallPath, pkg.NameVersion)
 
-	// 5. Download each output
+	// 5. Download each output into its own subdirectory
 	for outputName, storeHash := range outputsToDownload {
 		pm.logger.Printf("--- Processing output: %s (%s) ---", outputName, storeHash)
 
@@ -186,10 +186,13 @@ func (pm *PackageManager) Download(ctx context.Context, attribute string, opts *
 			}
 		}
 
-		// E. Extract (Merge into same directory)
+		// E. Extract into output-specific subdirectory
 		if opts.Extract {
-			pm.logger.Printf("Extracting %s to: %s", outputName, targetDir)
-			if err := pm.extractNAR(narPath, targetDir, narInfo.Compression); err != nil {
+			// Extract each output to its own directory: baseDir/outputName/
+			outputDir := filepath.Join(baseDir, outputName)
+			pm.logger.Printf("Extracting %s to: %s", outputName, outputDir)
+			
+			if err := pm.extractNAR(narPath, outputDir, narInfo.Compression); err != nil {
 				return fmt.Errorf("extracting %s: %w", outputName, err)
 			}
 
@@ -200,7 +203,12 @@ func (pm *PackageManager) Download(ctx context.Context, attribute string, opts *
 		}
 	}
 
-	pm.logger.Printf("✓ All outputs downloaded and merged into: %s", targetDir)
+	pm.logger.Printf("✓ All outputs downloaded to: %s/", baseDir)
+	pm.logger.Printf("  Output directories:")
+	for outputName := range outputsToDownload {
+		pm.logger.Printf("    - %s/%s/", baseDir, outputName)
+	}
+	
 	return nil
 }
 
