@@ -68,10 +68,22 @@ func ParseFeed(r io.Reader) ([]*PackageInfo, error) {
 
 	var packages []*PackageInfo
 	for _, entry := range feed.Entries {
+		// Use Atom title as fallback for ID if not in properties
+		id := entry.Props.ID
+		if id == "" {
+			id = entry.Title
+		}
+
+		// Use Property Title (Display Name) if available, else fallback to Atom Title
+		title := entry.Props.Title
+		if title == "" {
+			title = entry.Title
+		}
+
 		pkg := &PackageInfo{
-			ID:              entry.Props.ID,
+			ID:              id,
 			Version:         entry.Props.Version,
-			Title:           entry.Title,
+			Title:           title,
 			Description:     strings.TrimSpace(entry.Props.Description),
 			Summary:         strings.TrimSpace(entry.Props.Summary),
 			Authors:         entry.Props.Authors,
