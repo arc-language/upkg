@@ -6,7 +6,7 @@ const (
 	DefaultRepositoryURL = "https://dl.fedoraproject.org/pub/fedora/linux"
 
 	// DefaultRelease is the default Fedora release
-	DefaultRelease = "40" // Fedora 40 (latest stable)
+	DefaultRelease = "39" // Fedora 39 (latest stable as of now)
 
 	// DefaultRepository is the default repository name
 	DefaultRepository = "releases"
@@ -17,23 +17,14 @@ const (
 
 // Common Fedora releases
 const (
-	ReleaseFedora40     = "40" // Latest stable
-	ReleaseFedora39     = "39" // Previous stable
-	ReleaseFedora38     = "38" // Old stable
-	ReleaseRawhide      = "development/rawhide" // Bleeding edge
+	ReleaseFedora39     = "39" // Latest stable
+	ReleaseFedora38     = "38" // Previous stable
+	ReleaseFedora37     = "37" // Old stable
+	ReleaseRawhide      = "rawhide" // Bleeding edge
 )
 
 // Fedora repositories
 const (
-	RepoReleases        = "releases"        // Stable releases
-	RepoUpdates         = "updates"         // Updates to stable
-	RepoModular         = "modular"         // Modular packages
-	RepoEverything      = "everything"      // All packages
-	RepoDevelopment     = "development"     // Rawhide/development
-)
-
-// Repository paths
-const (
-	RepoBaseOS         = "Everything"  // Base packages path
-	RepoAppStream      = "Modular"     // AppStream/Modular packages
+	RepoReleases   = "releases" // Stable releases
+	RepoUpdates    = "updates"  // Updates to stable
 )

@@ -22,7 +22,7 @@ func NewDnfBackend(config *Config) (*DnfBackend, error) {
 
 	dnfConfig := &dnf.Config{
 		RepositoryURL: "https://dl.fedoraproject.org/pub/fedora/linux",
-		Release:       "40",
+		Release:       "39", // Changed from 40 to 39
 		Repository:    "releases",
 		InstallPath:   config.InstallPath,
 		CachePath:     config.CachePath,

@@ -128,15 +128,19 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 
 	// Construct download URL
 	baseURL := pm.config.RepositoryURL
+	var downloadURL string
+
 	if pm.config.Repository == "updates" {
-		baseURL = fmt.Sprintf("%s/updates/%s/Everything/%s",
-			baseURL, pm.config.Release, opts.Architecture)
+		downloadURL = fmt.Sprintf("%s/updates/%s/Everything/%s/%s",
+			baseURL, pm.config.Release, opts.Architecture, pkgInfo.Location)
+	} else if pm.config.Release == "rawhide" {
+		downloadURL = fmt.Sprintf("%s/development/rawhide/Everything/%s/os/%s",
+			baseURL, opts.Architecture, pkgInfo.Location)
 	} else {
-		baseURL = fmt.Sprintf("%s/%s/%s/Everything/%s/os",
-			baseURL, pm.config.Repository, pm.config.Release, opts.Architecture)
+		downloadURL = fmt.Sprintf("%s/releases/%s/Everything/%s/os/%s",
+			baseURL, pm.config.Release, opts.Architecture, pkgInfo.Location)
 	}
 
-	downloadURL := fmt.Sprintf("%s/%s", baseURL, pkgInfo.Location)
 	if err := pm.downloadPackage(ctx, downloadURL, rpmPath); err != nil {
 		return fmt.Errorf("downloading package: %w", err)
 	}
@@ -193,16 +197,22 @@ func (pm *PackageManager) updatePackageIndex(ctx context.Context, arch Architect
 	// Clear cache before updating
 	pm.cache.packages = make(map[string]*PackageInfo)
 
-	// Construct repomd.xml URL
+	// Construct base URL and repomd.xml URL
 	baseURL := pm.config.RepositoryURL
 	var repomdURL string
 
 	if pm.config.Repository == "updates" {
+		// Updates repository structure
 		repomdURL = fmt.Sprintf("%s/updates/%s/Everything/%s/repodata/repomd.xml",
 			baseURL, pm.config.Release, arch)
+	} else if pm.config.Release == "rawhide" {
+		// Rawhide (development) structure
+		repomdURL = fmt.Sprintf("%s/development/rawhide/Everything/%s/os/repodata/repomd.xml",
+			baseURL, arch)
 	} else {
-		repomdURL = fmt.Sprintf("%s/%s/%s/Everything/%s/os/repodata/repomd.xml",
-			baseURL, pm.config.Repository, pm.config.Release, arch)
+		// Regular releases structure
+		repomdURL = fmt.Sprintf("%s/releases/%s/Everything/%s/os/repodata/repomd.xml",
+			baseURL, pm.config.Release, arch)
 	}
 
 	pm.logger.Printf("  Fetching repomd.xml: %s", repomdURL)
@@ -240,9 +250,12 @@ func (pm *PackageManager) updatePackageIndex(ctx context.Context, arch Architect
 	if pm.config.Repository == "updates" {
 		primaryURL = fmt.Sprintf("%s/updates/%s/Everything/%s/%s",
 			baseURL, pm.config.Release, arch, primaryLocation)
+	} else if pm.config.Release == "rawhide" {
+		primaryURL = fmt.Sprintf("%s/development/rawhide/Everything/%s/os/%s",
+			baseURL, arch, primaryLocation)
 	} else {
-		primaryURL = fmt.Sprintf("%s/%s/%s/Everything/%s/os/%s",
-			baseURL, pm.config.Repository, pm.config.Release, arch, primaryLocation)
+		primaryURL = fmt.Sprintf("%s/releases/%s/Everything/%s/os/%s",
+			baseURL, pm.config.Release, arch, primaryLocation)
 	}
 
 	pm.logger.Printf("  Downloading primary.xml from: %s", primaryURL)
