@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/ulikunitz/xz"
 )
 
@@ -95,6 +96,25 @@ func (c *Client) GetXZ(ctx context.Context, url string) (io.ReadCloser, error) {
 	return &combinedCloser{
 		Reader:  xzReader,
 		closers: []io.Closer{resp.Body},
+	}, nil
+}
+
+// GetZstd performs an HTTP GET request and returns a zstd reader
+func (c *Client) GetZstd(ctx context.Context, url string) (io.ReadCloser, error) {
+	resp, err := c.Get(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+
+	zstdReader, err := zstd.NewReader(resp.Body)
+	if err != nil {
+		resp.Body.Close()
+		return nil, fmt.Errorf("creating zstd reader: %w", err)
+	}
+
+	return &combinedCloser{
+		Reader:  zstdReader,
+		closers: []io.Closer{zstdReader.IOReadCloser(), resp.Body},
 	}, nil
 }
 

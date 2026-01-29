@@ -260,12 +260,14 @@ func (pm *PackageManager) updatePackageIndex(ctx context.Context, arch Architect
 
 	pm.logger.Printf("  Downloading primary.xml from: %s", primaryURL)
 
-	// Download and decompress primary.xml (usually .gz or .xz)
+	// Download and decompress primary.xml (usually .gz, .xz, or .zst)
 	var primaryReader io.ReadCloser
 	if strings.HasSuffix(primaryLocation, ".gz") {
 		primaryReader, err = pm.client.GetGzipped(ctx, primaryURL)
 	} else if strings.HasSuffix(primaryLocation, ".xz") {
 		primaryReader, err = pm.client.GetXZ(ctx, primaryURL)
+	} else if strings.HasSuffix(primaryLocation, ".zst") {
+		primaryReader, err = pm.client.GetZstd(ctx, primaryURL)
 	} else {
 		resp, err = pm.client.Get(ctx, primaryURL)
 		if err == nil {
