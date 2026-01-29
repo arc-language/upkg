@@ -13,7 +13,7 @@ import (
 
 // ParseAPKINDEX parses an Alpine APKINDEX file
 func ParseAPKINDEX(r io.Reader) ([]*PackageInfo, error) {
-	// APKINDEX.tar.gz contains a single file named "APKINDEX"
+	// APKINDEX.tar.gz contains multiple files: signature file(s) and APKINDEX
 	gzReader, err := gzip.NewReader(r)
 	if err != nil {
 		return nil, fmt.Errorf("creating gzip reader: %w", err)
@@ -22,18 +22,29 @@ func ParseAPKINDEX(r io.Reader) ([]*PackageInfo, error) {
 
 	tarReader := tar.NewReader(gzReader)
 
-	// Read the first (and only) file from the tar
-	header, err := tarReader.Next()
-	if err != nil {
-		return nil, fmt.Errorf("reading tar entry: %w", err)
-	}
+	// Iterate through tar entries to find APKINDEX
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			return nil, fmt.Errorf("APKINDEX file not found in tar archive")
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading tar entry: %w", err)
+		}
 
-	// Verify we're reading the APKINDEX file
-	if header.Name != "APKINDEX" && header.Name != "./APKINDEX" {
-		return nil, fmt.Errorf("unexpected file in tar: %s (expected APKINDEX)", header.Name)
-	}
+		// Skip signature files and other metadata
+		if strings.HasPrefix(header.Name, ".SIGN.") {
+			continue
+		}
 
-	return parseAPKINDEXContent(tarReader)
+		// Found the APKINDEX file
+		if header.Name == "APKINDEX" || header.Name == "./APKINDEX" {
+			return parseAPKINDEXContent(tarReader)
+		}
+
+		// Skip other files
+		continue
+	}
 }
 
 // parseAPKINDEXContent parses the content of an APKINDEX file
