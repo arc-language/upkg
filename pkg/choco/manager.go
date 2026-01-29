@@ -145,8 +145,8 @@ func (pm *PackageManager) getPackageInfo(ctx context.Context, packageID, version
 		// Get specific version
 		url = fmt.Sprintf("%s/Packages(Id='%s',Version='%s')", pm.config.RepositoryURL, packageID, version)
 	} else {
-		// Get latest version
-		url = fmt.Sprintf("%s/Packages()?$filter=Id eq '%s' and IsLatestVersion&$top=1", pm.config.RepositoryURL, packageID)
+		// Get latest version - FIXED: use tolower(Id) and proper filter syntax
+		url = fmt.Sprintf("%s/Packages()?$filter=(tolower(Id) eq '%s') and IsLatestVersion&$top=1", pm.config.RepositoryURL, packageID)
 	}
 
 	pm.logger.Printf("  Fetching package metadata: %s", url)
@@ -303,7 +303,9 @@ func (pm *PackageManager) GetPackageInfo(ctx context.Context, name string) (*Pac
 
 // SearchPackages searches for packages
 func (pm *PackageManager) SearchPackages(ctx context.Context, query string) ([]*PackageInfo, error) {
-	url := fmt.Sprintf("%s/Search()?$filter=IsLatestVersion&searchTerm='%s'&$top=30", pm.config.RepositoryURL, query)
+	// FIXED: proper Search() endpoint parameters
+	url := fmt.Sprintf("%s/Search()?$filter=IsLatestVersion&$orderby=Id&searchTerm='%s'&targetFramework=''&includePrerelease=false&$skip=0&$top=30&semVerLevel=2.0.0", 
+		pm.config.RepositoryURL, query)
 
 	pm.logger.Printf("Searching packages: %s", url)
 
