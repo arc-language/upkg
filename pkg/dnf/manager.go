@@ -9,10 +9,11 @@ import (
 	"io"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/sassoftware/go-rpmutils"
 )
 
 // NewPackageManager creates a new Fedora/DNF package manager
@@ -383,7 +384,7 @@ func (pm *PackageManager) verifyFileHash(filePath, expectedHash, hashType string
 	return nil
 }
 
-// extractRPMPackage extracts an .rpm package using rpm2cpio and cpio
+// extractRPMPackage extracts an .rpm package using native Go implementation
 func (pm *PackageManager) extractRPMPackage(rpmPath, installPath string) error {
 	pm.logger.Printf("Extracting .rpm package: %s -> %s", rpmPath, installPath)
 
@@ -392,52 +393,28 @@ func (pm *PackageManager) extractRPMPackage(rpmPath, installPath string) error {
 		return fmt.Errorf("creating install directory: %w", err)
 	}
 
-	// Check if rpm2cpio is available
-	if _, err := exec.LookPath("rpm2cpio"); err != nil {
-		pm.logger.Printf("  rpm2cpio not found, attempting to extract with Go implementation")
-		return pm.extractRPMNative(rpmPath, installPath)
-	}
-
-	// Use rpm2cpio | cpio to extract
-	pm.logger.Printf("  Using rpm2cpio and cpio for extraction")
-
-	// rpm2cpio converts rpm to cpio format
-	rpm2cpioCmd := exec.Command("rpm2cpio", rpmPath)
-	cpioCmd := exec.Command("cpio", "-idmv")
-	cpioCmd.Dir = installPath
-
-	// Pipe rpm2cpio output to cpio input
-	pipe, err := rpm2cpioCmd.StdoutPipe()
+	// Open the RPM file
+	f, err := os.Open(rpmPath)
 	if err != nil {
-		return fmt.Errorf("creating pipe: %w", err)
+		return fmt.Errorf("opening rpm file: %w", err)
 	}
-	cpioCmd.Stdin = pipe
+	defer f.Close()
 
-	// Start both commands
-	if err := rpm2cpioCmd.Start(); err != nil {
-		return fmt.Errorf("starting rpm2cpio: %w", err)
-	}
-	if err := cpioCmd.Start(); err != nil {
-		return fmt.Errorf("starting cpio: %w", err)
+	// Read the RPM package
+	rpm, err := rpmutils.ReadRpm(f)
+	if err != nil {
+		return fmt.Errorf("reading rpm package: %w", err)
 	}
 
-	// Wait for both to complete
-	if err := rpm2cpioCmd.Wait(); err != nil {
-		return fmt.Errorf("rpm2cpio failed: %w", err)
-	}
-	if err := cpioCmd.Wait(); err != nil {
-		return fmt.Errorf("cpio failed: %w", err)
+	pm.logger.Printf("  Using native Go RPM extraction")
+
+	// Extract the payload to the install path
+	if err := rpm.ExpandPayload(installPath); err != nil {
+		return fmt.Errorf("expanding rpm payload: %w", err)
 	}
 
 	pm.logger.Printf("  ✓ Extraction complete")
 	return nil
-}
-
-// extractRPMNative is a fallback native Go implementation for RPM extraction
-func (pm *PackageManager) extractRPMNative(rpmPath, installPath string) error {
-	pm.logger.Printf("  Note: Native RPM extraction is limited. Install rpm2cpio for best results.")
-	pm.logger.Printf("  Run: sudo dnf install rpm (Fedora) or sudo apt install rpm2cpio (Debian/Ubuntu)")
-	return fmt.Errorf("rpm2cpio not available - please install it: sudo dnf install rpm")
 }
 
 // GetPackageInfo retrieves information about a package
