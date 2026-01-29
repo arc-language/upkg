@@ -6,6 +6,9 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"strings"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 // ParseRepomd finds the location of the 'primary' metadata file from repomd.xml
@@ -25,17 +28,33 @@ func ParseRepomd(r io.Reader) (string, error) {
 }
 
 // ParsePrimary parses the primary package metadata
-// This file can be very large, so we stream it.
-func ParsePrimary(r io.Reader, repoName string) ([]*PackageInfo, error) {
-	// 1. Handle Gzip
-	gzReader, err := gzip.NewReader(r)
-	if err != nil {
-		return nil, fmt.Errorf("gzip reader: %w", err)
-	}
-	defer gzReader.Close()
+// filename is used to determine compression type (gz or zst)
+func ParsePrimary(r io.Reader, filename string, repoName string) ([]*PackageInfo, error) {
+	var xmlReader io.Reader
+	var err error
 
-	// 2. XML Stream
-	decoder := xml.NewDecoder(gzReader)
+	// Handle compression based on file extension
+	if strings.HasSuffix(filename, ".zst") {
+		decoder, err := zstd.NewReader(r)
+		if err != nil {
+			return nil, fmt.Errorf("zstd reader: %w", err)
+		}
+		defer decoder.Close()
+		xmlReader = decoder
+	} else if strings.HasSuffix(filename, ".gz") {
+		gzReader, err := gzip.NewReader(r)
+		if err != nil {
+			return nil, fmt.Errorf("gzip reader: %w", err)
+		}
+		defer gzReader.Close()
+		xmlReader = gzReader
+	} else {
+		// Assume uncompressed
+		xmlReader = r
+	}
+
+	// XML Stream
+	decoder := xml.NewDecoder(xmlReader)
 	var packages []*PackageInfo
 
 	for {

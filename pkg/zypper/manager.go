@@ -125,6 +125,7 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 	return nil
 }
 
+// Find the updateDB function and replace it with this updated version:
 func (pm *PackageManager) updateDB(ctx context.Context, arch string) error {
 	if len(pm.cache.packages) > 0 && time.Since(pm.cache.lastUpdate) < pm.cache.cacheDuration {
 		return nil
@@ -164,7 +165,8 @@ func (pm *PackageManager) updateDB(ctx context.Context, arch string) error {
 			continue
 		}
 
-		pkgs, err := ParsePrimary(primaryBody, repoPath)
+		// FIXED: Pass primaryLoc (filename) so parser knows to use zstd or gzip
+		pkgs, err := ParsePrimary(primaryBody, primaryLoc, repoPath)
 		primaryBody.Close()
 		if err != nil {
 			pm.logger.Printf("    ⚠️ Failed to parse primary XML: %v", err)
