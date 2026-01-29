@@ -22,6 +22,8 @@ const (
 	BackendDpkg BackendType = "dpkg"
 	// BackendApt uses the Ubuntu package manager
 	BackendApt BackendType = "apt"
+	// BackendApk uses the Alpine package manager
+	BackendApk BackendType = "apk"
 	// BackendAuto automatically detects the best backend
 	BackendAuto BackendType = "auto"
 )

@@ -15,7 +15,7 @@ import (
 
 func main() {
 	var (
-		backendName = flag.String("backend", "auto", "Backend to use (auto, nix, brew, dpkg, apt)")
+		backendName = flag.String("backend", "auto", "Backend to use (auto, nix, brew, dpkg, apt, apk)")
 		pkgName     = flag.String("package", "", "Package name to download")
 		pkgVersion  = flag.String("version", "", "Package version (optional)")
 		platform    = flag.String("platform", "", "Target platform/architecture (optional)")
@@ -71,9 +71,11 @@ func main() {
 		backendType = upkg.BackendDpkg
 	case "apt":
 		backendType = upkg.BackendApt
+	case "apk":
+		backendType = upkg.BackendApk
 	default:
 		fmt.Printf("Unknown backend: %s\n", *backendName)
-		fmt.Println("Available backends: auto, nix, brew, dpkg, apt")
+		fmt.Println("Available backends: auto, nix, brew, dpkg, apt, apk")
 		os.Exit(1)
 	}
 

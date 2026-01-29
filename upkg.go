@@ -28,6 +28,7 @@ const (
 	BackendBrew = backend.BackendBrew
 	BackendDpkg = backend.BackendDpkg
 	BackendApt  = backend.BackendApt
+	BackendApk  = backend.BackendApk
 	BackendAuto = backend.BackendAuto
 )
 
@@ -60,6 +61,8 @@ func NewManager(backendType backend.BackendType, config *backend.Config) (*Manag
 		b, err = backend.NewDpkgBackend(config)
 	case backend.BackendApt:
 		b, err = backend.NewAptBackend(config)
+	case backend.BackendApk:
+		b, err = backend.NewApkBackend(config)
 	case backend.BackendAuto:
 		b, err = autoDetectBackend(config)
 	default:
@@ -76,20 +79,26 @@ func NewManager(backendType backend.BackendType, config *backend.Config) (*Manag
 	}, nil
 }
 
-// autoDetectBackend automatically selects the best backend for the current system
+// Update autoDetectBackend to check for Alpine:
 func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
 	// Check if Homebrew is available (macOS or Linux with Homebrew)
 	if runtime.GOOS == "darwin" {
-		// Prefer Homebrew on macOS
 		b, err := backend.NewBrewBackend(config)
 		if err == nil {
 			return b, nil
 		}
 	}
 
-	// Try APT on Linux (for Ubuntu/Ubuntu-based)
 	if runtime.GOOS == "linux" {
-		// Check if this is Ubuntu by looking for /etc/os-release
+		// Check if this is Alpine
+		if isAlpine() {
+			b, err := backend.NewApkBackend(config)
+			if err == nil {
+				return b, nil
+			}
+		}
+
+		// Check if this is Ubuntu
 		if isUbuntu() {
 			b, err := backend.NewAptBackend(config)
 			if err == nil {
@@ -119,6 +128,20 @@ func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
 	}
 
 	return nil, fmt.Errorf("no suitable package manager backend found")
+}
+
+// isAlpine checks if the system is Alpine Linux
+func isAlpine() bool {
+	data, err := os.ReadFile("/etc/os-release")
+	if err != nil {
+		// Also check for /etc/alpine-release
+		if _, err := os.Stat("/etc/alpine-release"); err == nil {
+			return true
+		}
+		return false
+	}
+	content := strings.ToLower(string(data))
+	return strings.Contains(content, "alpine")
 }
 
 // isUbuntu checks if the system is Ubuntu

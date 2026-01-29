@@ -24,8 +24,12 @@ github.com/arc-language/upkg v0.0.0-20260129032014-47653cf8f0e4 h1:Qhzu3MpFgPZ6D
 github.com/arc-language/upkg v0.0.0-20260129032014-47653cf8f0e4/go.mod h1:IG4Ujj4VVEKGv3/x6+s19wq5jDZoYrB5YupCxLB0TOc=
 github.com/arc-language/upkg v0.0.0-20260129032328-67d1efa55221 h1:waWR3wk0LetBEdj0CQ9XSep5hcrCHpI1d1rQvhR3Lmk=
 github.com/arc-language/upkg v0.0.0-20260129032328-67d1efa55221/go.mod h1:IG4Ujj4VVEKGv3/x6+s19wq5jDZoYrB5YupCxLB0TOc=
+github.com/arc-language/upkg v0.0.0-20260129032700-aac487b0ac1f h1:ZmIgdhs1IDdn6dT4H5nI/8JEfCtRX+CMxOAnE9fG+Zc=
+github.com/arc-language/upkg v0.0.0-20260129032700-aac487b0ac1f/go.mod h1:IG4Ujj4VVEKGv3/x6+s19wq5jDZoYrB5YupCxLB0TOc=
 github.com/blakesmith/ar v0.0.0-20190502131153-809d4375e1fb h1:m935MPodAbYS46DG4pJSv7WO+VECIWUQ7OJYSoTrMh4=
 github.com/blakesmith/ar v0.0.0-20190502131153-809d4375e1fb/go.mod h1:PkYb9DJNAwrSvRx5DYA+gUcOIgTGVMNkfSCbZM8cWpI=
+github.com/klauspost/compress v1.18.3 h1:9PJRvfbmTabkOX8moIpXPbMMbYN60bWImDDU7L+/6zw=
+github.com/klauspost/compress v1.18.3/go.mod h1:R0h/fSBs8DE4ENlcrlib3PsXS61voFxhIs2DeRhCvJ4=
 github.com/ulikunitz/xz v0.5.15 h1:9DNdB5s+SgV3bQ2ApL10xRc35ck0DuIX/isZvIk+ubY=
 github.com/ulikunitz/xz v0.5.15/go.mod h1:nbz6k7qbPmH4IRqmfOplQw/tblSgqTqBwxkY0oWt/14=
 zombiezen.com/go/nix v0.0.0-20250514174927-d97ab08b45de h1:X37qVOQIIuiEfWf+P4bMpaVPKr9mdwmj2sj3dj7UY18=
