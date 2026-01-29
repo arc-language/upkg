@@ -7,11 +7,9 @@ import (
 	"compress/bzip2"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,216 +62,117 @@ func NewPackageManager(cfg *Config) *PackageManager {
 	return pm
 }
 
-// ResolvePackageName queries search.nixos.org Elasticsearch API to find all outputs for a package.
-// Returns: (map[outputName]storeHash, nameWithVersion, error)
-func (pm *PackageManager) ResolvePackageName(ctx context.Context, packageName string, platform Platform) (map[string]string, string, error) {
-	if platform == "" {
-		var err error
-		platform, err = DetectPlatform()
-		if err != nil {
-			return nil, "", err
-		}
-	}
-
-	// Use search.nixos.org Elasticsearch API
-	channel := "nixos-unstable" // Could make this configurable via Config
-	searchURL := fmt.Sprintf("https://search.nixos.org/%s/_search", channel)
-	pm.logger.Printf("Resolving package '%s' via search.nixos.org API: %s", packageName, searchURL)
-
-	// Build Elasticsearch query
-	query := map[string]interface{}{
-		"query": map[string]interface{}{
-			"bool": map[string]interface{}{
-				"must": []map[string]interface{}{
-					{"term": map[string]interface{}{"type": "package"}},
-					{"term": map[string]interface{}{"package_system": string(platform)}},
-				},
-				"should": []map[string]interface{}{
-					{"match": map[string]interface{}{
-						"package_attr_name": map[string]interface{}{
-							"query": packageName,
-							"boost": 3,
-						},
-					}},
-					{"match": map[string]interface{}{
-						"package_pname": map[string]interface{}{
-							"query": packageName,
-							"boost": 2,
-						},
-					}},
-				},
-				"minimum_should_match": 1,
-			},
-		},
-		"size": 1, // Get the best match
-	}
-
-	// Marshal query to JSON
-	jsonData, err := json.Marshal(query)
-	if err != nil {
-		return nil, "", fmt.Errorf("marshaling query: %w", err)
-	}
-
-	// Create request
-	req, err := http.NewRequestWithContext(ctx, "POST", searchURL, bytes.NewReader(jsonData))
-	if err != nil {
-		return nil, "", fmt.Errorf("creating search request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", pm.client.userAgent)
-
-	// Execute request
-	resp, err := pm.client.httpClient.Do(req)
-	if err != nil {
-		return nil, "", fmt.Errorf("search request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("search API returned status %d", resp.StatusCode)
-	}
-
-	// Parse response
-	var result struct {
-		Hits struct {
-			Total struct {
-				Value int `json:"value"`
-			} `json:"total"`
-			Hits []struct {
-				Source struct {
-					PackageAttrName string            `json:"package_attr_name"`
-					PackagePname    string            `json:"package_pname"`
-					PackageVersion  string            `json:"package_version"`
-					PackageOutputs  map[string]string `json:"package_outputs"`
-				} `json:"_source"`
-			} `json:"hits"`
-		} `json:"hits"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, "", fmt.Errorf("parsing search response: %w", err)
-	}
-
-	if len(result.Hits.Hits) == 0 {
-		return nil, "", fmt.Errorf("package '%s' not found for platform '%s'", packageName, platform)
-	}
-
-	hit := result.Hits.Hits[0].Source
-	pm.logger.Printf("Found package: %s (v%s)", hit.PackageAttrName, hit.PackageVersion)
-
-	// Extract store hashes from full paths
-	// Path format: /nix/store/<hash>-<name>-<version>[-<output>]
+// parseStorePath parses a StorePath field into a map of outputs
+// Format: "bin=/nix/store/hash-name;dev=/nix/store/hash-name;/nix/store/hash-name"
+func parseStorePath(storePath string) map[string]string {
 	outputs := make(map[string]string)
-	for outputName, storePath := range hit.PackageOutputs {
-		// Parse "/nix/store/hash-name-version" to get just "hash"
-		pathWithoutPrefix := strings.TrimPrefix(storePath, "/nix/store/")
-		parts := strings.SplitN(pathWithoutPrefix, "-", 2)
-		if len(parts) > 0 && parts[0] != "" {
-			outputs[outputName] = parts[0]
-			pm.logger.Printf("  Output '%s': %s", outputName, parts[0])
+	parts := strings.Split(storePath, ";")
+
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		if strings.Contains(part, "=") {
+			// Named output: "bin=/nix/store/hash-name"
+			kv := strings.SplitN(part, "=", 2)
+			outputName := kv[0]
+			fullPath := kv[1]
+			
+			// Extract hash from "/nix/store/hash-name-version"
+			pathWithoutPrefix := strings.TrimPrefix(fullPath, "/nix/store/")
+			hashParts := strings.SplitN(pathWithoutPrefix, "-", 2)
+			if len(hashParts) > 0 {
+				outputs[outputName] = hashParts[0]
+			}
+		} else {
+			// Default output: "/nix/store/hash-name"
+			pathWithoutPrefix := strings.TrimPrefix(part, "/nix/store/")
+			hashParts := strings.SplitN(pathWithoutPrefix, "-", 2)
+			if len(hashParts) > 0 {
+				outputs["out"] = hashParts[0]
+			}
 		}
 	}
 
-	if len(outputs) == 0 {
-		return nil, "", fmt.Errorf("no valid outputs found for package '%s'", packageName)
-	}
-
-	nameVersion := fmt.Sprintf("%s-%s", hit.PackagePname, hit.PackageVersion)
-	pm.logger.Printf("✓ Resolved '%s' to %d outputs", packageName, len(outputs))
-
-	return outputs, nameVersion, nil
+	return outputs
 }
 
-// helper to print keys
-func reflectKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
+// LookupPackage finds a package by attribute name
+func (pm *PackageManager) LookupPackage(attribute string) (*Package, error) {
+	pkg, ok := x86_64_linux_Packages[attribute]
+	if !ok {
+		return nil, fmt.Errorf("package '%s' not found in registry", attribute)
 	}
-	return keys
+	return &pkg, nil
 }
 
-// Download downloads and installs a Nix package.
-// If opts.StoreHash is empty, it resolves ALL outputs (bin, dev, lib, etc.) and downloads them all.
-func (pm *PackageManager) Download(ctx context.Context, name, version string, opts *DownloadOptions) error {
-	pm.logger.Printf("Starting download request for: %s", name)
+// Download downloads and installs a Nix package by attribute name
+func (pm *PackageManager) Download(ctx context.Context, attribute string, opts *DownloadOptions) error {
+	pm.logger.Printf("Starting download request for: %s", attribute)
 
 	if opts == nil {
 		opts = &DownloadOptions{}
-	}
-
-	// 1. Ensure Platform
-	if opts.Platform == "" {
-		detected, err := DetectPlatform()
-		if err != nil {
-			return fmt.Errorf("detecting platform: %w", err)
-		}
-		opts.Platform = detected
-		pm.logger.Printf("Auto-detected platform: %s", opts.Platform)
-	}
-
-	// 2. Determine what to download
-	// downloads map maps "outputName" -> "storeHash"
-	downloads := make(map[string]string)
-	var folderName string
-
-	if opts.StoreHash != "" {
-		// Manual mode: specific hash only
-		downloads["default"] = opts.StoreHash
-		if version == "" {
-			folderName = name
-		} else {
-			folderName = fmt.Sprintf("%s-%s", name, version)
-		}
-	} else {
-		// Auto-resolve mode: fetch all outputs
-		pm.logger.Printf("StoreHash not provided. Attempting to auto-resolve package: %s", name)
-		resolvedOutputs, resolvedName, err := pm.ResolvePackageName(ctx, name, opts.Platform)
-		if err != nil {
-			return fmt.Errorf("resolving package name: %w", err)
-		}
-		downloads = resolvedOutputs
-
-		if version == "" {
-			folderName = resolvedName
-		} else {
-			folderName = fmt.Sprintf("%s-%s", name, version)
-		}
 	}
 
 	// Set defaults
 	if opts.Compression == "" {
 		opts.Compression = CompressionXZ
 	}
-	if !opts.Extract && opts.KeepArchive {
-		opts.Extract = false
-	} else if opts.Extract == false && opts.KeepArchive == false {
+	if !opts.KeepArchive {
 		opts.Extract = true
 	}
-	if opts.VerifyHash == false {
-		opts.VerifyHash = true
+	opts.VerifyHash = true
+
+	// 1. Lookup package in registry
+	pkg, err := pm.LookupPackage(attribute)
+	if err != nil {
+		return fmt.Errorf("looking up package: %w", err)
 	}
 
-	pm.logger.Printf("Download options:")
-	pm.logger.Printf("  Target Folder: %s", folderName)
-	pm.logger.Printf("  Outputs to fetch: %d %v", len(downloads), reflectKeys(downloads))
+	pm.logger.Printf("Found package: %s (%s)", pkg.Attribute, pkg.NameVersion)
 
-	// 3. Process each output
-	// We extract everything into the SAME folder to merge them (like installing headers and libs together)
-	targetDir := filepath.Join(pm.config.InstallPath, folderName)
+	// 2. Parse store paths to get outputs
+	allOutputs := parseStorePath(pkg.StorePath)
+	if len(allOutputs) == 0 {
+		return fmt.Errorf("no valid outputs found in store path")
+	}
 
-	for outputName, hash := range downloads {
-		pm.logger.Printf("--- Processing output: %s (%s) ---", outputName, hash)
+	pm.logger.Printf("Available outputs: %v", getKeys(allOutputs))
+
+	// 3. Determine which outputs to download
+	outputsToDownload := allOutputs
+	if len(opts.Outputs) > 0 {
+		// Filter to only requested outputs
+		outputsToDownload = make(map[string]string)
+		for _, requestedOutput := range opts.Outputs {
+			if hash, ok := allOutputs[requestedOutput]; ok {
+				outputsToDownload[requestedOutput] = hash
+			} else {
+				return fmt.Errorf("requested output '%s' not available (available: %v)", 
+					requestedOutput, getKeys(allOutputs))
+			}
+		}
+	}
+
+	pm.logger.Printf("Downloading %d output(s): %v", len(outputsToDownload), getKeys(outputsToDownload))
+
+	// 4. Create target directory (merge all outputs into one folder)
+	targetDir := filepath.Join(pm.config.InstallPath, pkg.NameVersion)
+
+	// 5. Download each output
+	for outputName, storeHash := range outputsToDownload {
+		pm.logger.Printf("--- Processing output: %s (%s) ---", outputName, storeHash)
 
 		// A. Get Metadata
-		narInfo, err := pm.GetNARInfo(ctx, hash)
+		narInfo, err := pm.GetNARInfo(ctx, storeHash)
 		if err != nil {
 			return fmt.Errorf("getting narinfo for %s: %w", outputName, err)
 		}
 
 		// B. Determine archive path
-		// We append the output name to the archive file so they don't overwrite each other
-		archiveName := fmt.Sprintf("%s-%s.nar.%s", folderName, outputName, narInfo.Compression)
+		archiveName := fmt.Sprintf("%s-%s.nar.%s", pkg.NameVersion, outputName, narInfo.Compression)
 		narPath := filepath.Join(pm.config.InstallPath, archiveName)
 
 		// C. Download
@@ -288,9 +187,9 @@ func (pm *PackageManager) Download(ctx context.Context, name, version string, op
 			}
 		}
 
-		// E. Extract (Merge)
+		// E. Extract (Merge into same directory)
 		if opts.Extract {
-			pm.logger.Printf("Extracting %s to merged directory: %s", outputName, targetDir)
+			pm.logger.Printf("Extracting %s to: %s", outputName, targetDir)
 			if err := pm.extractNAR(narPath, targetDir, narInfo.Compression); err != nil {
 				return fmt.Errorf("extracting %s: %w", outputName, err)
 			}
@@ -313,13 +212,13 @@ func (pm *PackageManager) GetNARInfo(ctx context.Context, storeHash string) (*NA
 
 	content, err := pm.client.GetString(ctx, url)
 	if err != nil {
-		pm.logger.Printf("❌ Failed to fetch NAR info: %v", err)
+		pm.logger.Printf("✗ Failed to fetch NAR info: %v", err)
 		return nil, err
 	}
 
 	narInfo, err := parseNARInfo(content)
 	if err != nil {
-		pm.logger.Printf("❌ Failed to parse NAR info: %v", err)
+		pm.logger.Printf("✗ Failed to parse NAR info: %v", err)
 		return nil, err
 	}
 
@@ -345,7 +244,7 @@ func (pm *PackageManager) downloadNAR(ctx context.Context, narInfo *NARInfo, des
 
 	// Download
 	if err := pm.client.Download(ctx, url, f); err != nil {
-		pm.logger.Printf("❌ Failed to download NAR: %v", err)
+		pm.logger.Printf("✗ Failed to download NAR: %v", err)
 		return fmt.Errorf("downloading: %w", err)
 	}
 
@@ -396,11 +295,10 @@ func (pm *PackageManager) extractNAR(narPath, destPath, compression string) erro
 		if err != nil {
 			return fmt.Errorf("decompressing: %w", err)
 		}
-		// Clean up decompressed file after extraction
 		defer os.Remove(decompressedPath)
 	}
 
-	// Now extract the plain NAR
+	// Extract the plain NAR
 	return pm.extractPlainNAR(decompressedPath, destPath)
 }
 
@@ -408,50 +306,38 @@ func (pm *PackageManager) extractNAR(narPath, destPath, compression string) erro
 func (pm *PackageManager) decompressFile(compressedPath, compression string) (string, error) {
 	pm.logger.Printf("Decompressing %s archive...", compression)
 
-	// Output path without compression extension
 	decompressedPath := compressedPath
 	switch compression {
 	case "xz":
-		decompressedPath = compressedPath[:len(compressedPath)-3] // Remove .xz
-	case "bzip2":
-		decompressedPath = compressedPath[:len(compressedPath)-4] // Remove .bz2
-	default:
-		return "", fmt.Errorf("unsupported compression: %s", compression)
-	}
-
-	switch compression {
-	case "xz":
+		decompressedPath = compressedPath[:len(compressedPath)-3]
 		return decompressedPath, pm.decompressXZ(compressedPath, decompressedPath)
 	case "bzip2":
+		decompressedPath = compressedPath[:len(compressedPath)-4]
 		return decompressedPath, pm.decompressBZip2(compressedPath, decompressedPath)
 	default:
 		return "", fmt.Errorf("unsupported compression: %s", compression)
 	}
 }
 
-// decompressXZ decompresses an xz file using native Go library
+// decompressXZ decompresses an xz file
 func (pm *PackageManager) decompressXZ(src, dst string) error {
-	// Open source file
 	inputFile, err := os.Open(src)
 	if err != nil {
 		return fmt.Errorf("opening source file: %w", err)
 	}
 	defer inputFile.Close()
 
-	// Create XZ reader
 	xzReader, err := xz.NewReader(inputFile)
 	if err != nil {
 		return fmt.Errorf("creating xz reader: %w", err)
 	}
 
-	// Create destination file
 	outFile, err := os.Create(dst)
 	if err != nil {
 		return fmt.Errorf("creating output file: %w", err)
 	}
 	defer outFile.Close()
 
-	// Copy content
 	if _, err := io.Copy(outFile, xzReader); err != nil {
 		return fmt.Errorf("decompressing data: %w", err)
 	}
@@ -459,26 +345,22 @@ func (pm *PackageManager) decompressXZ(src, dst string) error {
 	return nil
 }
 
-// decompressBZip2 decompresses a bzip2 file using standard Go library
+// decompressBZip2 decompresses a bzip2 file
 func (pm *PackageManager) decompressBZip2(src, dst string) error {
-	// Open source file
 	inputFile, err := os.Open(src)
 	if err != nil {
 		return fmt.Errorf("opening source file: %w", err)
 	}
 	defer inputFile.Close()
 
-	// Create BZip2 reader (standard library)
 	bzReader := bzip2.NewReader(inputFile)
 
-	// Create destination file
 	outFile, err := os.Create(dst)
 	if err != nil {
 		return fmt.Errorf("creating output file: %w", err)
 	}
 	defer outFile.Close()
 
-	// Copy content
 	if _, err := io.Copy(outFile, bzReader); err != nil {
 		return fmt.Errorf("decompressing data: %w", err)
 	}
@@ -488,23 +370,19 @@ func (pm *PackageManager) decompressBZip2(src, dst string) error {
 
 // extractPlainNAR extracts an uncompressed NAR archive
 func (pm *PackageManager) extractPlainNAR(narPath, destPath string) error {
-	pm.logger.Printf("Extracting NAR archive using Go NAR library...")
+	pm.logger.Printf("Extracting NAR archive...")
 
-	// Open the NAR file
 	f, err := os.Open(narPath)
 	if err != nil {
 		return fmt.Errorf("opening NAR file: %w", err)
 	}
 	defer f.Close()
 
-	// Create a buffered reader for better performance
 	bufReader := bufio.NewReader(f)
 	narReader := nar.NewReader(bufReader)
 
-	// Track statistics
 	fileCount := 0
 
-	// Read and extract each entry
 	for {
 		hdr, err := narReader.Next()
 		if err == io.EOF {
@@ -514,21 +392,17 @@ func (pm *PackageManager) extractPlainNAR(narPath, destPath string) error {
 			return fmt.Errorf("reading NAR entry: %w", err)
 		}
 
-		// Construct target path
 		targetPath := filepath.Join(destPath, hdr.Path)
 
-		// Handle different file types
 		switch hdr.Mode.Type() {
 		case os.ModeDir:
 			if err := os.MkdirAll(targetPath, 0755); err != nil {
 				return fmt.Errorf("creating directory %s: %w", targetPath, err)
 			}
 		case os.ModeSymlink:
-			// Ensure parent directory exists
 			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
 				return fmt.Errorf("creating parent directory: %w", err)
 			}
-			// Create symlink
 			if err := os.Symlink(hdr.LinkTarget, targetPath); err != nil {
 				return fmt.Errorf("creating symlink: %w", err)
 			}
@@ -556,12 +430,18 @@ func (pm *PackageManager) extractPlainNAR(narPath, destPath string) error {
 				return fmt.Errorf("size mismatch")
 			}
 			fileCount++
-
-		default:
-			// Ignore other types
 		}
 	}
 
 	pm.logger.Printf("✓ Extraction complete (%d files)", fileCount)
 	return nil
+}
+
+// Helper function to get map keys
+func getKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }

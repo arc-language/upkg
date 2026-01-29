@@ -36,18 +36,16 @@ type NARInfo struct {
 	Signature   string
 }
 
-// Package represents a Nix package
+// Package represents a Nix package from the static registry
 type Package struct {
-	Name      string
-	Version   string
-	StoreHash string   // The hash portion of the store path
-	Platform  Platform // Target platform
+	Attribute   string
+	NameVersion string
+	StorePath   string // Can contain multiple outputs: "bin=/nix/store/...;dev=/nix/store/..."
 }
 
 // DownloadOptions configures package download and extraction
 type DownloadOptions struct {
-	StoreHash    string   // Required: the store hash (e.g., "p4pclmv1gyja5kzc26npqpia1qqxrf0l")
-	Platform     Platform // Target platform (auto-detected if empty)
+	Outputs      []string // Which outputs to download (e.g., ["bin", "dev"]). Empty = all outputs
 	Compression  string   // xz, bzip2, none
 	Extract      bool     // Whether to extract the NAR archive (default: true)
 	KeepArchive  bool     // Whether to keep the .nar.xz file after extraction (default: false)
