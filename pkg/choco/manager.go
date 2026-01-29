@@ -145,9 +145,9 @@ func (pm *PackageManager) getPackageInfo(ctx context.Context, packageID, version
 		// Get specific version using Packages() endpoint
 		url = fmt.Sprintf("%s/Packages(Id='%s',Version='%s')", pm.config.RepositoryURL, packageID, version)
 	} else {
-		// Get latest version - use FindPackagesById with filter for latest
-		url = fmt.Sprintf("%s/FindPackagesById()?id='%s'&$filter=IsAbsoluteLatestVersion&semVerLevel=2.0.0", 
-			pm.config.RepositoryURL, packageID)
+		// Get latest version using Packages() with filter - THIS IS THE FIX
+		url = fmt.Sprintf("%s/Packages()?$filter=(tolower(Id) eq '%s') and IsLatestVersion&semVerLevel=2.0.0", 
+			pm.config.RepositoryURL, strings.ToLower(packageID))
 	}
 
 	pm.logger.Printf("  Fetching package metadata: %s", url)
