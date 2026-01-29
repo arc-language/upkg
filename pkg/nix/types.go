@@ -36,13 +36,6 @@ type NARInfo struct {
 	Signature   string
 }
 
-// Package represents a Nix package from the static registry
-type Package struct {
-	Attribute   string
-	NameVersion string
-	StorePath   string // Can contain multiple outputs: "bin=/nix/store/...;dev=/nix/store/..."
-}
-
 // DownloadOptions configures package download and extraction
 type DownloadOptions struct {
 	Outputs      []string // Which outputs to download (e.g., ["bin", "dev"]). Empty = all outputs
