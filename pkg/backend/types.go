@@ -24,6 +24,8 @@ const (
 	BackendApt BackendType = "apt"
 	// BackendApk uses the Alpine package manager
 	BackendApk BackendType = "apk"
+	// BackendDnf uses the Fedora package manager
+	BackendDnf BackendType = "dnf"
 	// BackendAuto automatically detects the best backend
 	BackendAuto BackendType = "auto"
 )

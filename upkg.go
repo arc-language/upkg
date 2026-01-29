@@ -29,6 +29,7 @@ const (
 	BackendDpkg = backend.BackendDpkg
 	BackendApt  = backend.BackendApt
 	BackendApk  = backend.BackendApk
+	BackendDnf  = backend.BackendDnf
 	BackendAuto = backend.BackendAuto
 )
 
@@ -63,6 +64,8 @@ func NewManager(backendType backend.BackendType, config *backend.Config) (*Manag
 		b, err = backend.NewAptBackend(config)
 	case backend.BackendApk:
 		b, err = backend.NewApkBackend(config)
+	case backend.BackendDnf:
+		b, err = backend.NewDnfBackend(config)
 	case backend.BackendAuto:
 		b, err = autoDetectBackend(config)
 	default:
@@ -98,6 +101,14 @@ func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
 			}
 		}
 
+		// Check if this is Fedora
+		if isFedora() {
+			b, err := backend.NewDnfBackend(config)
+			if err == nil {
+				return b, nil
+			}
+		}
+
 		// Check if this is Ubuntu
 		if isUbuntu() {
 			b, err := backend.NewAptBackend(config)
@@ -128,6 +139,20 @@ func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
 	}
 
 	return nil, fmt.Errorf("no suitable package manager backend found")
+}
+
+// isFedora checks if the system is Fedora
+func isFedora() bool {
+	data, err := os.ReadFile("/etc/os-release")
+	if err != nil {
+		// Also check for /etc/fedora-release
+		if _, err := os.Stat("/etc/fedora-release"); err == nil {
+			return true
+		}
+		return false
+	}
+	content := strings.ToLower(string(data))
+	return strings.Contains(content, "fedora")
 }
 
 // isAlpine checks if the system is Alpine Linux
