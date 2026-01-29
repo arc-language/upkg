@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/blakesmith/ar"
+	"github.com/klauspost/compress/zstd"
 	"github.com/ulikunitz/xz"
 )
 
@@ -357,8 +358,13 @@ func (pm *PackageManager) extractDataTar(r io.Reader, name, installPath string) 
 		}
 		tarReader = tar.NewReader(xzReader)
 	} else if strings.HasSuffix(name, ".zst") {
-		// zstd compression - we can add this if needed
-		return fmt.Errorf("zstd compression not yet supported, please install github.com/klauspost/compress/zstd")
+		pm.logger.Printf("  Using zstd decompression")
+		zstdReader, err := zstd.NewReader(r)
+		if err != nil {
+			return fmt.Errorf("creating zstd reader: %w", err)
+		}
+		defer zstdReader.Close()
+		tarReader = tar.NewReader(zstdReader)
 	} else {
 		// Assume uncompressed tar
 		pm.logger.Printf("  Using uncompressed tar")

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/blakesmith/ar"
+	"github.com/klauspost/compress/zstd"
 	"github.com/ulikunitz/xz"
 )
 
@@ -395,8 +396,13 @@ func (pm *PackageManager) extractDataTar(r io.Reader, name, installPath string) 
 		}
 		tarReader = tar.NewReader(xzReader)
 	} else if strings.HasSuffix(name, ".zst") {
-		// zstd compression
-		return fmt.Errorf("zstd compression not yet supported")
+		pm.logger.Printf("  Using zstd decompression")
+		zstdReader, err := zstd.NewReader(r)
+		if err != nil {
+			return fmt.Errorf("creating zstd reader: %w", err)
+		}
+		defer zstdReader.Close()
+		tarReader = tar.NewReader(zstdReader)
 	} else {
 		// Assume uncompressed tar
 		pm.logger.Printf("  Using uncompressed tar")
@@ -486,6 +492,7 @@ func (pm *PackageManager) extractDataTar(r io.Reader, name, installPath string) 
 
 	return nil
 }
+
 
 // GetPackageInfo retrieves information about a package
 func (pm *PackageManager) GetPackageInfo(ctx context.Context, name string, arch Architecture) (*PackageInfo, error) {
