@@ -142,11 +142,12 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 func (pm *PackageManager) getPackageInfo(ctx context.Context, packageID, version string) (*PackageInfo, error) {
 	var url string
 	if version != "" {
-		// Get specific version
+		// Get specific version using Packages() endpoint
 		url = fmt.Sprintf("%s/Packages(Id='%s',Version='%s')", pm.config.RepositoryURL, packageID, version)
 	} else {
-		// Get latest version - FIXED: use tolower(Id) and proper filter syntax
-		url = fmt.Sprintf("%s/Packages()?$filter=(tolower(Id) eq '%s') and IsLatestVersion&$top=1", pm.config.RepositoryURL, packageID)
+		// Get latest version - use FindPackagesById with filter for latest
+		url = fmt.Sprintf("%s/FindPackagesById()?id='%s'&$filter=IsAbsoluteLatestVersion&semVerLevel=2.0.0", 
+			pm.config.RepositoryURL, packageID)
 	}
 
 	pm.logger.Printf("  Fetching package metadata: %s", url)
