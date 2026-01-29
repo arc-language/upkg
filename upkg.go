@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/arc-language/upkg/pkg/backend"
+	"github.com/arc-language/upkg/pkg/choco"
 )
 
 // Re-export backend types for convenience
