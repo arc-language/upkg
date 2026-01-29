@@ -145,8 +145,9 @@ func (pm *PackageManager) getPackageInfo(ctx context.Context, packageID, version
 		// Get specific version using Packages() endpoint
 		url = fmt.Sprintf("%s/Packages(Id='%s',Version='%s')", pm.config.RepositoryURL, packageID, version)
 	} else {
-		// Get latest version using Packages() with filter - THIS IS THE FIX
-		url = fmt.Sprintf("%s/Packages()?$filter=(tolower(Id) eq '%s') and IsLatestVersion&semVerLevel=2.0.0", 
+		// Get latest version using Packages() with filter
+		// We use %20 (escaped as %%20) instead of spaces to ensure OData compatibility and avoid 400 Bad Request
+		url = fmt.Sprintf("%s/Packages()?$filter=(tolower(Id)%%20eq%%20'%s')%%20and%%20IsLatestVersion&semVerLevel=2.0.0", 
 			pm.config.RepositoryURL, strings.ToLower(packageID))
 	}
 
