@@ -1,7 +1,7 @@
+// pkg/zypper/manager.go
 package zypper
 
 import (
-	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -311,7 +311,10 @@ func (pm *PackageManager) extractRPM(rpmPath, dest string) error {
 		os.MkdirAll(filepath.Dir(target), 0755)
 
 		if header.Mode.IsRegular() {
-			outFile, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, header.Mode)
+			// FIXED: Cast to os.FileMode to fix type mismatch
+			perm := os.FileMode(header.Mode & 0777)
+			
+			outFile, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, perm)
 			if err != nil {
 				return err
 			}
@@ -320,11 +323,12 @@ func (pm *PackageManager) extractRPM(rpmPath, dest string) error {
 				return err
 			}
 			outFile.Close()
-		} else if header.Mode&cpio.ModeSymlink != 0 {
-			// Handle symlinks if possible, or read link content
-			// CPIO library might handle reading link name differently
-			// For simplicity in this snippet, we skip complex symlink handling 
-			// unless header.Linkname is populated (depends on cpio lib version)
+		} else if (header.Mode & 0170000) == 0120000 { // FIXED: Use octal for symlink check
+			// Handle symlinks
+			if header.Linkname != "" {
+				os.Remove(target)
+				os.Symlink(header.Linkname, target)
+			}
 		}
 	}
 

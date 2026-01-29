@@ -1,3 +1,4 @@
+// pkg/zypper/parser.go
 package zypper
 
 import (
@@ -5,7 +6,6 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
-	"strings"
 )
 
 // ParseRepomd finds the location of the 'primary' metadata file from repomd.xml
