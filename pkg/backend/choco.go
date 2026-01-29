@@ -20,10 +20,7 @@ func NewChocoBackend(config *Config) (*ChocoBackend, error) {
 		config = DefaultConfig()
 	}
 
-	// Check if we're on Windows
-	if err := choco.DetectPlatform(); err != nil {
-		return nil, err
-	}
+	// No platform check here - allow use from any platform
 
 	chocoConfig := &choco.Config{
 		RepositoryURL: "https://community.chocolatey.org/api/v2",

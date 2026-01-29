@@ -48,6 +48,8 @@ github.com/arc-language/upkg v0.0.0-20260129040801-383b202d7201 h1:Wpm2fC4UDpMNp
 github.com/arc-language/upkg v0.0.0-20260129040801-383b202d7201/go.mod h1:IG4Ujj4VVEKGv3/x6+s19wq5jDZoYrB5YupCxLB0TOc=
 github.com/arc-language/upkg v0.0.0-20260129041150-e8435a607ef1 h1:jPI5lbd3+yC0/LOAhLDkwQmvuP4wG0+4Ha8yQqhcRI0=
 github.com/arc-language/upkg v0.0.0-20260129041150-e8435a607ef1/go.mod h1:IG4Ujj4VVEKGv3/x6+s19wq5jDZoYrB5YupCxLB0TOc=
+github.com/arc-language/upkg v0.0.0-20260129042656-169ffeda331d h1:1l7RIa0lDDFvK5rLitKHHCK8ey+ppyIrPc0um9Jjiok=
+github.com/arc-language/upkg v0.0.0-20260129042656-169ffeda331d/go.mod h1:IG4Ujj4VVEKGv3/x6+s19wq5jDZoYrB5YupCxLB0TOc=
 github.com/blakesmith/ar v0.0.0-20190502131153-809d4375e1fb h1:m935MPodAbYS46DG4pJSv7WO+VECIWUQ7OJYSoTrMh4=
 github.com/blakesmith/ar v0.0.0-20190502131153-809d4375e1fb/go.mod h1:PkYb9DJNAwrSvRx5DYA+gUcOIgTGVMNkfSCbZM8cWpI=
 github.com/bwesterb/go-ristretto v1.2.3/go.mod h1:fUIoIZaG73pV5biE2Blr2xEzDoMj7NFEuV9ekS419A0=

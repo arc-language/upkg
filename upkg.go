@@ -95,6 +95,16 @@ func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
 		}
 	}
 
+	if runtime.GOOS == "windows" {
+		// Try Chocolatey on Windows
+		if err := choco.DetectPlatform(); err == nil {
+			b, err := backend.NewChocoBackend(config)
+			if err == nil {
+				return b, nil
+			}
+		}
+	}
+
 	if runtime.GOOS == "linux" {
 		// Check if this is Alpine
 		if isAlpine() {
@@ -122,14 +132,6 @@ func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
 
 		// Try dpkg for Debian
 		b, err := backend.NewDpkgBackend(config)
-		if err == nil {
-			return b, nil
-		}
-	}
-
-	if runtime.GOOS == "windows" {
-		// Try Chocolatey first on Windows
-		b, err := backend.NewChocoBackend(config)
 		if err == nil {
 			return b, nil
 		}
