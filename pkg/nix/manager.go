@@ -3,7 +3,6 @@ package nix
 
 import (
 	"bufio"
-	"bytes"
 	"compress/bzip2"
 	"context"
 	"crypto/sha256"
