@@ -204,63 +204,84 @@ func (pm *PackageManager) updatePackageIndex(ctx context.Context, arch Architect
 		pm.logger.Printf("  Using ports repository for %s architecture", arch)
 	}
 
-	// Construct URL for Packages.gz
-	url := fmt.Sprintf("%s/dists/%s/%s/binary-%s/Packages.gz",
-		repoURL,
-		pm.config.Release,
-		pm.config.Component,
-		arch)
-
-	pm.logger.Printf("  URL: %s", url)
-
-	// Download and decompress
-	reader, err := pm.client.GetGzipped(ctx, url)
-	if err != nil {
-		return fmt.Errorf("fetching packages index: %w", err)
-	}
-	defer reader.Close()
-
-	// Parse packages
-	packages, err := ParsePackages(reader)
-	if err != nil {
-		return fmt.Errorf("parsing packages: %w", err)
-	}
-
-	pm.logger.Printf("  Parsed %d packages", len(packages))
-
-	// Update cache
+	// Clear cache before updating
 	pm.cache.packages = make(map[string]*PackageInfo)
-	for _, pkg := range packages {
-		key := fmt.Sprintf("%s_%s_%s", pkg.Package, pkg.Architecture, pm.config.Component)
-		pm.cache.packages[key] = pkg
+
+	// Common Ubuntu components to search
+	components := []string{"main", "universe", "restricted", "multiverse"}
+	
+	totalPackages := 0
+	for _, component := range components {
+		// Construct URL for Packages.gz
+		url := fmt.Sprintf("%s/dists/%s/%s/binary-%s/Packages.gz",
+			repoURL,
+			pm.config.Release,
+			component,
+			arch)
+
+		pm.logger.Printf("  Fetching %s component: %s", component, url)
+
+		// Download and decompress
+		reader, err := pm.client.GetGzipped(ctx, url)
+		if err != nil {
+			pm.logger.Printf("  ⚠️  Warning: failed to fetch %s component: %v", component, err)
+			continue // Skip this component if it fails
+		}
+
+		// Parse packages
+		packages, err := ParsePackages(reader)
+		reader.Close()
+		if err != nil {
+			pm.logger.Printf("  ⚠️  Warning: failed to parse %s component: %v", component, err)
+			continue
+		}
+
+		pm.logger.Printf("  ✓ Parsed %d packages from %s", len(packages), component)
+
+		// Add to cache
+		for _, pkg := range packages {
+			key := fmt.Sprintf("%s_%s_%s", pkg.Package, pkg.Architecture, component)
+			pm.cache.packages[key] = pkg
+		}
+		
+		totalPackages += len(packages)
 	}
+
+	pm.logger.Printf("  Total packages indexed: %d", totalPackages)
 	pm.cache.lastUpdate = time.Now()
 
 	return nil
 }
 
-// findPackage finds a package in the cache
+// findPackage finds a package in the cache across all components
 func (pm *PackageManager) findPackage(name, version string, arch Architecture) (*PackageInfo, error) {
-	// Try exact architecture first
-	key := fmt.Sprintf("%s_%s_%s", name, arch, pm.config.Component)
-	if pkg, ok := pm.cache.packages[key]; ok {
-		if version == "" || pkg.Version == version {
-			return pkg, nil
+	// Search order: main, universe, restricted, multiverse
+	components := []string{"main", "universe", "restricted", "multiverse"}
+	
+	for _, component := range components {
+		// Try exact architecture first
+		key := fmt.Sprintf("%s_%s_%s", name, arch, component)
+		if pkg, ok := pm.cache.packages[key]; ok {
+			if version == "" || pkg.Version == version {
+				pm.logger.Printf("  Found in component: %s", component)
+				return pkg, nil
+			}
 		}
-	}
 
-	// Try "all" architecture
-	key = fmt.Sprintf("%s_%s_%s", name, ArchAll, pm.config.Component)
-	if pkg, ok := pm.cache.packages[key]; ok {
-		if version == "" || pkg.Version == version {
-			return pkg, nil
+		// Try "all" architecture
+		key = fmt.Sprintf("%s_%s_%s", name, ArchAll, component)
+		if pkg, ok := pm.cache.packages[key]; ok {
+			if version == "" || pkg.Version == version {
+				pm.logger.Printf("  Found in component: %s", component)
+				return pkg, nil
+			}
 		}
 	}
 
 	if version != "" {
 		return nil, fmt.Errorf("package %s version %s not found for architecture %s", name, version, arch)
 	}
-	return nil, fmt.Errorf("package %s not found for architecture %s", name, arch)
+	return nil, fmt.Errorf("package %s not found for architecture %s (searched components: main, universe, restricted, multiverse)", name, arch)
 }
 
 // downloadPackage downloads a .deb package
