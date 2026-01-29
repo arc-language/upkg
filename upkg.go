@@ -4,7 +4,9 @@ package upkg
 import (
 	"context"
 	"fmt"
+	"os"
 	"runtime"
+	"strings"
 
 	"github.com/arc-language/upkg/pkg/backend"
 )
@@ -49,7 +51,6 @@ func NewManager(backendType backend.BackendType, config *backend.Config) (*Manag
 	var b backend.Backend
 	var err error
 
-	// In NewManager function, add case for dpkg:
 	switch backendType {
 	case backend.BackendNix:
 		b, err = backend.NewNixBackend(config)
@@ -75,7 +76,7 @@ func NewManager(backendType backend.BackendType, config *backend.Config) (*Manag
 	}, nil
 }
 
-// In autoDetectBackend function, add apt detection (prioritize apt for Ubuntu):
+// autoDetectBackend automatically selects the best backend for the current system
 func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
 	// Check if Homebrew is available (macOS or Linux with Homebrew)
 	if runtime.GOOS == "darwin" {
@@ -95,7 +96,7 @@ func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
 				return b, nil
 			}
 		}
-		
+
 		// Try dpkg for Debian
 		b, err := backend.NewDpkgBackend(config)
 		if err == nil {
@@ -126,7 +127,8 @@ func isUbuntu() bool {
 	if err != nil {
 		return false
 	}
-	return strings.Contains(strings.ToLower(string(data)), "ubuntu")
+	content := strings.ToLower(string(data))
+	return strings.Contains(content, "ubuntu") && !strings.Contains(content, "debian")
 }
 
 // Download downloads and installs a package

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/arc-language/upkg"
@@ -14,7 +15,7 @@ import (
 
 func main() {
 	var (
-		backendName = flag.String("backend", "auto", "Backend to use (auto, nix, brew, dpkg)")
+		backendName = flag.String("backend", "auto", "Backend to use (auto, nix, brew, dpkg, apt)")
 		pkgName     = flag.String("package", "", "Package name to download")
 		pkgVersion  = flag.String("version", "", "Package version (optional)")
 		platform    = flag.String("platform", "", "Target platform/architecture (optional)")
@@ -30,9 +31,19 @@ func main() {
 
 	// Check for required arguments
 	if *pkgName == "" && *search == "" {
-		fmt.Println("Usage: upkg -package=<name> [-version=<version>] [-backend=<auto|nix|brew|dpkg>] [-info]")
-		fmt.Println("   or: upkg -search=<keyword> [-backend=<auto|nix|brew|dpkg>]")
+		fmt.Println("upkg - Universal Package Manager")
 		fmt.Println()
+		fmt.Println("Usage: upkg -package=<name> [-version=<version>] [-backend=<auto|nix|brew|dpkg|apt>] [-info]")
+		fmt.Println("   or: upkg -search=<keyword> [-backend=<auto|nix|brew|dpkg|apt>]")
+		fmt.Println()
+		fmt.Println("Backends:")
+		fmt.Println("  auto  - Automatically detect best backend (default)")
+		fmt.Println("  nix   - Nix package manager")
+		fmt.Println("  brew  - Homebrew package manager (macOS/Linux)")
+		fmt.Println("  dpkg  - Debian package manager (Debian-focused)")
+		fmt.Println("  apt   - Ubuntu package manager (Ubuntu-focused)")
+		fmt.Println()
+		fmt.Println("Options:")
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
@@ -58,9 +69,11 @@ func main() {
 		backendType = upkg.BackendBrew
 	case "dpkg":
 		backendType = upkg.BackendDpkg
+	case "apt":
+		backendType = upkg.BackendApt
 	default:
 		fmt.Printf("Unknown backend: %s\n", *backendName)
-		fmt.Println("Available backends: auto, nix, brew, dpkg")
+		fmt.Println("Available backends: auto, nix, brew, dpkg, apt")
 		os.Exit(1)
 	}
 
@@ -97,7 +110,7 @@ func main() {
 				fmt.Printf("... and %d more results (showing first 20)\n", len(results)-20)
 				break
 			}
-			fmt.Printf("%s (%s)\n", pkg.Name, pkg.Version)
+			fmt.Printf("📦 %s (%s)\n", pkg.Name, pkg.Version)
 			if pkg.Description != "" {
 				// Limit description to first line
 				desc := pkg.Description
@@ -107,10 +120,10 @@ func main() {
 				if len(desc) > 80 {
 					desc = desc[:77] + "..."
 				}
-				fmt.Printf("  %s\n", desc)
+				fmt.Printf("   %s\n", desc)
 			}
 			if len(pkg.Platforms) > 0 {
-				fmt.Printf("  Platforms: %v\n", pkg.Platforms)
+				fmt.Printf("   Platforms: %v\n", pkg.Platforms)
 			}
 			fmt.Println()
 		}
@@ -126,27 +139,42 @@ func main() {
 			os.Exit(1)
 		}
 
-		fmt.Printf("\nPackage Information:\n")
-		fmt.Printf("═══════════════════════════════════════════════════════\n")
-		fmt.Printf("  Name:        %s\n", pkgInfo.Name)
-		fmt.Printf("  Version:     %s\n", pkgInfo.Version)
-		fmt.Printf("  Backend:     %s\n", pkgInfo.Backend)
+		fmt.Printf("\n")
+		fmt.Printf("╔═══════════════════════════════════════════════════════════════╗\n")
+		fmt.Printf("║                    Package Information                        ║\n")
+		fmt.Printf("╠═══════════════════════════════════════════════════════════════╣\n")
+		fmt.Printf("║ Name:        %-48s ║\n", truncate(pkgInfo.Name, 48))
+		fmt.Printf("║ Version:     %-48s ║\n", truncate(pkgInfo.Version, 48))
+		fmt.Printf("║ Backend:     %-48s ║\n", truncate(pkgInfo.Backend, 48))
 		if pkgInfo.Description != "" {
-			fmt.Printf("  Description: %s\n", pkgInfo.Description)
+			descLines := wrapText(pkgInfo.Description, 48)
+			fmt.Printf("║ Description: %-48s ║\n", descLines[0])
+			for i := 1; i < len(descLines) && i < 3; i++ {
+				fmt.Printf("║              %-48s ║\n", descLines[i])
+			}
+			if len(descLines) > 3 {
+				fmt.Printf("║              %-48s ║\n", "...")
+			}
 		}
 		if pkgInfo.Homepage != "" {
-			fmt.Printf("  Homepage:    %s\n", pkgInfo.Homepage)
+			fmt.Printf("║ Homepage:    %-48s ║\n", truncate(pkgInfo.Homepage, 48))
 		}
 		if pkgInfo.License != "" {
-			fmt.Printf("  License:     %s\n", pkgInfo.License)
+			fmt.Printf("║ License:     %-48s ║\n", truncate(pkgInfo.License, 48))
 		}
 		if len(pkgInfo.Platforms) > 0 {
-			fmt.Printf("  Platforms:   %v\n", pkgInfo.Platforms)
+			platformStr := strings.Join(pkgInfo.Platforms, ", ")
+			fmt.Printf("║ Platforms:   %-48s ║\n", truncate(platformStr, 48))
 		}
 		if len(pkgInfo.Outputs) > 0 {
-			fmt.Printf("  Outputs:     %v\n", pkgInfo.Outputs)
+			var outputs []string
+			for k := range pkgInfo.Outputs {
+				outputs = append(outputs, k)
+			}
+			outputStr := strings.Join(outputs, ", ")
+			fmt.Printf("║ Outputs:     %-48s ║\n", truncate(outputStr, 48))
 		}
-		fmt.Printf("═══════════════════════════════════════════════════════\n")
+		fmt.Printf("╚═══════════════════════════════════════════════════════════════╝\n")
 	} else {
 		// Download package
 		pkg := &upkg.Package{
@@ -172,32 +200,52 @@ func main() {
 			opts.VerifyHash = &verify
 		}
 
-		fmt.Printf("\nDownloading package: %s\n", *pkgName)
+		fmt.Printf("\n")
+		fmt.Printf("╔═══════════════════════════════════════════════════════════════╗\n")
+		fmt.Printf("║                     Downloading Package                       ║\n")
+		fmt.Printf("╠═══════════════════════════════════════════════════════════════╣\n")
+		fmt.Printf("║ Package:  %-51s ║\n", truncate(*pkgName, 51))
 		if *pkgVersion != "" {
-			fmt.Printf("  Version:  %s\n", *pkgVersion)
+			fmt.Printf("║ Version:  %-51s ║\n", truncate(*pkgVersion, 51))
 		}
 		if *platform != "" {
-			fmt.Printf("  Platform: %s\n", *platform)
+			fmt.Printf("║ Platform: %-51s ║\n", truncate(*platform, 51))
 		}
-		fmt.Printf("  Install:  %s\n", config.InstallPath)
+		fmt.Printf("║ Install:  %-51s ║\n", truncate(config.InstallPath, 51))
+		fmt.Printf("╚═══════════════════════════════════════════════════════════════╝\n")
 		fmt.Println()
 
 		err := mgr.Download(ctx, pkg, opts)
 		if err != nil {
-			fmt.Printf("\n✗ Error downloading package: %v\n", err)
+			fmt.Printf("\n❌ Error downloading package: %v\n", err)
 			os.Exit(1)
 		}
 
-		fmt.Printf("\n✓ Successfully downloaded and installed %s\n", *pkgName)
-		
+		fmt.Printf("\n✅ Successfully downloaded and installed %s\n", *pkgName)
+
 		// Show some helpful next steps based on backend
 		switch mgr.Backend() {
-		case "brew", "dpkg":
-			fmt.Printf("\nInstallation location: %s\n", config.InstallPath)
-			fmt.Printf("You may need to add the following to your PATH:\n")
-			fmt.Printf("  export PATH=\"%s/bin:$PATH\"\n", config.InstallPath)
+		case "brew", "dpkg", "apt":
+			fmt.Printf("\n📍 Installation location: %s\n", config.InstallPath)
+			fmt.Printf("\n💡 You may need to add the following to your PATH:\n")
+			fmt.Printf("   export PATH=\"%s/bin:$PATH\"\n", config.InstallPath)
+			fmt.Printf("   export PATH=\"%s/usr/bin:$PATH\"\n", config.InstallPath)
+			fmt.Printf("\n   Or source this in your shell profile (~/.bashrc, ~/.zshrc):\n")
+			fmt.Printf("   echo 'export PATH=\"%s/bin:$PATH\"' >> ~/.bashrc\n", config.InstallPath)
 		case "nix":
-			fmt.Printf("\nNix package installed. Check your Nix profile for binaries.\n")
+			fmt.Printf("\n📍 Nix package installed. Check your Nix profile for binaries.\n")
+		}
+
+		// Show what was installed
+		fmt.Printf("\n📦 Installed files can be found in:\n")
+		switch mgr.Backend() {
+		case "dpkg", "apt":
+			fmt.Printf("   %s/usr/bin/     - Executables\n", config.InstallPath)
+			fmt.Printf("   %s/usr/lib/     - Libraries\n", config.InstallPath)
+			fmt.Printf("   %s/usr/share/   - Shared data\n", config.InstallPath)
+		case "brew":
+			fmt.Printf("   %s/Cellar/      - Bottle files\n", config.InstallPath)
+			fmt.Printf("   %s/bin/         - Executables (if linked)\n", config.InstallPath)
 		}
 	}
 }
@@ -210,4 +258,48 @@ func findNewline(s string) int {
 		}
 	}
 	return -1
+}
+
+// truncate truncates a string to a maximum length
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	if maxLen <= 3 {
+		return s[:maxLen]
+	}
+	return s[:maxLen-3] + "..."
+}
+
+// wrapText wraps text to fit within a specified width
+func wrapText(text string, width int) []string {
+	var lines []string
+	var currentLine string
+
+	words := strings.Fields(text)
+	for _, word := range words {
+		if len(currentLine)+len(word)+1 <= width {
+			if currentLine != "" {
+				currentLine += " "
+			}
+			currentLine += word
+		} else {
+			if currentLine != "" {
+				lines = append(lines, currentLine)
+			}
+			currentLine = word
+		}
+	}
+	if currentLine != "" {
+		lines = append(lines, currentLine)
+	}
+
+	// Pad lines to width
+	for i := range lines {
+		if len(lines[i]) < width {
+			lines[i] += strings.Repeat(" ", width-len(lines[i]))
+		}
+	}
+
+	return lines
 }
