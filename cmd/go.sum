@@ -16,6 +16,8 @@ github.com/arc-language/upkg v0.0.0-20260129003442-7b1e1ef53374 h1:lsoho1SwKLA62
 github.com/arc-language/upkg v0.0.0-20260129003442-7b1e1ef53374/go.mod h1:IG4Ujj4VVEKGv3/x6+s19wq5jDZoYrB5YupCxLB0TOc=
 github.com/arc-language/upkg v0.0.0-20260129030353-52c76fa2ebcb h1:M2oDZCJ2RILHKA//4INvWYvM56aY8G6a8yoxp6i9iYg=
 github.com/arc-language/upkg v0.0.0-20260129030353-52c76fa2ebcb/go.mod h1:IG4Ujj4VVEKGv3/x6+s19wq5jDZoYrB5YupCxLB0TOc=
+github.com/arc-language/upkg v0.0.0-20260129030904-8ee9ab3c3038 h1:t+SDVdZqt5t4jfFGOix36edPJnLHwQSykXCbRhI3q+0=
+github.com/arc-language/upkg v0.0.0-20260129030904-8ee9ab3c3038/go.mod h1:IG4Ujj4VVEKGv3/x6+s19wq5jDZoYrB5YupCxLB0TOc=
 github.com/blakesmith/ar v0.0.0-20190502131153-809d4375e1fb h1:m935MPodAbYS46DG4pJSv7WO+VECIWUQ7OJYSoTrMh4=
 github.com/blakesmith/ar v0.0.0-20190502131153-809d4375e1fb/go.mod h1:PkYb9DJNAwrSvRx5DYA+gUcOIgTGVMNkfSCbZM8cWpI=
 github.com/ulikunitz/xz v0.5.15 h1:9DNdB5s+SgV3bQ2ApL10xRc35ck0DuIX/isZvIk+ubY=

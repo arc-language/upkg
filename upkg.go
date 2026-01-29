@@ -25,6 +25,7 @@ const (
 	BackendNix  = backend.BackendNix
 	BackendBrew = backend.BackendBrew
 	BackendDpkg = backend.BackendDpkg
+	BackendApt  = backend.BackendApt
 	BackendAuto = backend.BackendAuto
 )
 
@@ -56,6 +57,8 @@ func NewManager(backendType backend.BackendType, config *backend.Config) (*Manag
 		b, err = backend.NewBrewBackend(config)
 	case backend.BackendDpkg:
 		b, err = backend.NewDpkgBackend(config)
+	case backend.BackendApt:
+		b, err = backend.NewAptBackend(config)
 	case backend.BackendAuto:
 		b, err = autoDetectBackend(config)
 	default:
@@ -72,7 +75,7 @@ func NewManager(backendType backend.BackendType, config *backend.Config) (*Manag
 	}, nil
 }
 
-// In autoDetectBackend function, add dpkg detection:
+// In autoDetectBackend function, add apt detection (prioritize apt for Ubuntu):
 func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
 	// Check if Homebrew is available (macOS or Linux with Homebrew)
 	if runtime.GOOS == "darwin" {
@@ -83,8 +86,17 @@ func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
 		}
 	}
 
-	// Try dpkg on Linux
+	// Try APT on Linux (for Ubuntu/Ubuntu-based)
 	if runtime.GOOS == "linux" {
+		// Check if this is Ubuntu by looking for /etc/os-release
+		if isUbuntu() {
+			b, err := backend.NewAptBackend(config)
+			if err == nil {
+				return b, nil
+			}
+		}
+		
+		// Try dpkg for Debian
 		b, err := backend.NewDpkgBackend(config)
 		if err == nil {
 			return b, nil
@@ -106,6 +118,15 @@ func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
 	}
 
 	return nil, fmt.Errorf("no suitable package manager backend found")
+}
+
+// isUbuntu checks if the system is Ubuntu
+func isUbuntu() bool {
+	data, err := os.ReadFile("/etc/os-release")
+	if err != nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(data)), "ubuntu")
 }
 
 // Download downloads and installs a package

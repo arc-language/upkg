@@ -20,6 +20,8 @@ const (
 	BackendBrew BackendType = "brew"
 	// BackendDpkg uses the Debian package manager
 	BackendDpkg BackendType = "dpkg"
+	// BackendApt uses the Ubuntu package manager
+	BackendApt BackendType = "apt"
 	// BackendAuto automatically detects the best backend
 	BackendAuto BackendType = "auto"
 )
