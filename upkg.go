@@ -30,6 +30,7 @@ const (
 	BackendApt  = backend.BackendApt
 	BackendApk  = backend.BackendApk
 	BackendDnf  = backend.BackendDnf
+	BackendChoco = backend.BackendChoco
 	BackendAuto = backend.BackendAuto
 )
 
@@ -66,6 +67,8 @@ func NewManager(backendType backend.BackendType, config *backend.Config) (*Manag
 		b, err = backend.NewApkBackend(config)
 	case backend.BackendDnf:
 		b, err = backend.NewDnfBackend(config)
+	case backend.BackendChoco:
+		b, err = backend.NewChocoBackend(config)
 	case backend.BackendAuto:
 		b, err = autoDetectBackend(config)
 	default:
@@ -119,6 +122,14 @@ func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
 
 		// Try dpkg for Debian
 		b, err := backend.NewDpkgBackend(config)
+		if err == nil {
+			return b, nil
+		}
+	}
+
+	if runtime.GOOS == "windows" {
+		// Try Chocolatey first on Windows
+		b, err := backend.NewChocoBackend(config)
 		if err == nil {
 			return b, nil
 		}

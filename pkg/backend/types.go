@@ -26,6 +26,8 @@ const (
 	BackendApk BackendType = "apk"
 	// BackendDnf uses the Fedora package manager
 	BackendDnf BackendType = "dnf"
+	// BackendChoco uses the choco package manager
+	BackendChoco BackendType = "choco"
 	// BackendAuto automatically detects the best backend
 	BackendAuto BackendType = "auto"
 )

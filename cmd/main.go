@@ -75,6 +75,8 @@ func main() {
 		backendType = upkg.BackendApk
 	case "dnf":
 		backendType = upkg.BackendDnf
+	case "choco":
+		backendType = upkg.BackendDnf
 	default:
 		fmt.Printf("Unknown backend: %s\n", *backendName)
 		fmt.Println("Available backends: auto, nix, brew, dpkg, apt, apk, dnf")
