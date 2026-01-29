@@ -15,7 +15,7 @@ import (
 
 func main() {
 	var (
-		backendName = flag.String("backend", "auto", "Backend to use (auto, nix, brew, dpkg, apt, apk, dnf)")
+		backendName = flag.String("backend", "auto", "Backend to use (auto, nix, brew, dpkg, apt, apk, dnf, choco, pacman)")
 		pkgName     = flag.String("package", "", "Package name to download")
 		pkgVersion  = flag.String("version", "", "Package version (optional)")
 		platform    = flag.String("platform", "", "Target platform/architecture (optional)")
@@ -33,15 +33,19 @@ func main() {
 	if *pkgName == "" && *search == "" {
 		fmt.Println("upkg - Universal Package Manager")
 		fmt.Println()
-		fmt.Println("Usage: upkg -package=<name> [-version=<version>] [-backend=<auto|nix|brew|dpkg|apt>] [-info]")
-		fmt.Println("   or: upkg -search=<keyword> [-backend=<auto|nix|brew|dpkg|apt>]")
+		fmt.Println("Usage: upkg -package=<name> [-version=<version>] [-backend=<type>] [-info]")
+		fmt.Println("   or: upkg -search=<keyword> [-backend=<type>]")
 		fmt.Println()
 		fmt.Println("Backends:")
-		fmt.Println("  auto  - Automatically detect best backend (default)")
-		fmt.Println("  nix   - Nix package manager")
-		fmt.Println("  brew  - Homebrew package manager (macOS/Linux)")
-		fmt.Println("  dpkg  - Debian package manager (Debian-focused)")
-		fmt.Println("  apt   - Ubuntu package manager (Ubuntu-focused)")
+		fmt.Println("  auto   - Automatically detect best backend (default)")
+		fmt.Println("  nix    - Nix package manager (Cross-platform)")
+		fmt.Println("  brew   - Homebrew package manager (macOS/Linux)")
+		fmt.Println("  dpkg   - Debian package manager (Debian-focused)")
+		fmt.Println("  apt    - Ubuntu package manager (Ubuntu-focused)")
+		fmt.Println("  apk    - Alpine package manager (Alpine Linux)")
+		fmt.Println("  dnf    - Fedora package manager (RedHat/Fedora)")
+		fmt.Println("  pacman - Arch Linux package manager (Arch/Manjaro)")
+		fmt.Println("  choco  - Chocolatey package manager (Windows)")
 		fmt.Println()
 		fmt.Println("Options:")
 		flag.PrintDefaults()
@@ -77,9 +81,11 @@ func main() {
 		backendType = upkg.BackendDnf
 	case "choco":
 		backendType = upkg.BackendChoco
+	case "pacman":
+		backendType = upkg.BackendPacman
 	default:
 		fmt.Printf("Unknown backend: %s\n", *backendName)
-		fmt.Println("Available backends: auto, nix, brew, dpkg, apt, apk, dnf")
+		fmt.Println("Available backends: auto, nix, brew, dpkg, apt, apk, dnf, choco, pacman")
 		os.Exit(1)
 	}
 
@@ -231,13 +237,16 @@ func main() {
 
 		// Show some helpful next steps based on backend
 		switch mgr.Backend() {
-		case "brew", "dpkg", "apt":
+		case "brew", "dpkg", "apt", "dnf", "apk", "pacman":
 			fmt.Printf("\n📍 Installation location: %s\n", config.InstallPath)
 			fmt.Printf("\n💡 You may need to add the following to your PATH:\n")
 			fmt.Printf("   export PATH=\"%s/bin:$PATH\"\n", config.InstallPath)
 			fmt.Printf("   export PATH=\"%s/usr/bin:$PATH\"\n", config.InstallPath)
 			fmt.Printf("\n   Or source this in your shell profile (~/.bashrc, ~/.zshrc):\n")
 			fmt.Printf("   echo 'export PATH=\"%s/bin:$PATH\"' >> ~/.bashrc\n", config.InstallPath)
+		case "choco":
+			fmt.Printf("\n📍 Installation location: %s\n", config.InstallPath)
+			fmt.Printf("\n💡 Windows binaries are usually in the tools directory or extracted root.\n")
 		case "nix":
 			fmt.Printf("\n📍 Nix package installed. Check your Nix profile for binaries.\n")
 		}
@@ -245,13 +254,18 @@ func main() {
 		// Show what was installed
 		fmt.Printf("\n📦 Installed files can be found in:\n")
 		switch mgr.Backend() {
-		case "dpkg", "apt":
+		case "dpkg", "apt", "dnf", "pacman":
 			fmt.Printf("   %s/usr/bin/     - Executables\n", config.InstallPath)
 			fmt.Printf("   %s/usr/lib/     - Libraries\n", config.InstallPath)
 			fmt.Printf("   %s/usr/share/   - Shared data\n", config.InstallPath)
+		case "apk":
+			fmt.Printf("   %s/bin/         - Executables\n", config.InstallPath)
+			fmt.Printf("   %s/lib/         - Libraries\n", config.InstallPath)
 		case "brew":
 			fmt.Printf("   %s/Cellar/      - Bottle files\n", config.InstallPath)
 			fmt.Printf("   %s/bin/         - Executables (if linked)\n", config.InstallPath)
+		case "choco":
+			fmt.Printf("   %s/%s/          - Package content\n", config.InstallPath, *pkgName)
 		}
 	}
 }

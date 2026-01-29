@@ -25,14 +25,15 @@ type (
 
 // Re-export backend constants
 const (
-	BackendNix  = backend.BackendNix
-	BackendBrew = backend.BackendBrew
-	BackendDpkg = backend.BackendDpkg
-	BackendApt  = backend.BackendApt
-	BackendApk  = backend.BackendApk
-	BackendDnf  = backend.BackendDnf
-	BackendChoco = backend.BackendChoco
-	BackendAuto = backend.BackendAuto
+	BackendNix    = backend.BackendNix
+	BackendBrew   = backend.BackendBrew
+	BackendDpkg   = backend.BackendDpkg
+	BackendApt    = backend.BackendApt
+	BackendApk    = backend.BackendApk
+	BackendDnf    = backend.BackendDnf
+	BackendChoco  = backend.BackendChoco
+	BackendPacman = backend.BackendPacman
+	BackendAuto   = backend.BackendAuto
 )
 
 // DefaultConfig returns a configuration with sensible defaults
@@ -70,6 +71,8 @@ func NewManager(backendType backend.BackendType, config *backend.Config) (*Manag
 		b, err = backend.NewDnfBackend(config)
 	case backend.BackendChoco:
 		b, err = backend.NewChocoBackend(config)
+	case backend.BackendPacman:
+		b, err = backend.NewPacmanBackend(config)
 	case backend.BackendAuto:
 		b, err = autoDetectBackend(config)
 	default:
@@ -86,7 +89,7 @@ func NewManager(backendType backend.BackendType, config *backend.Config) (*Manag
 	}, nil
 }
 
-// Update autoDetectBackend to check for Alpine:
+// autoDetectBackend detects the best backend for the current system
 func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
 	// Check if Homebrew is available (macOS or Linux with Homebrew)
 	if runtime.GOOS == "darwin" {
@@ -115,9 +118,17 @@ func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
 			}
 		}
 
-		// Check if this is Fedora
+		// Check if this is Fedora/RHEL
 		if isFedora() {
 			b, err := backend.NewDnfBackend(config)
+			if err == nil {
+				return b, nil
+			}
+		}
+
+		// Check if this is Arch Linux
+		if isArchLinux() {
+			b, err := backend.NewPacmanBackend(config)
 			if err == nil {
 				return b, nil
 			}
@@ -138,7 +149,7 @@ func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
 		}
 	}
 
-	// Try Nix as fallback
+	// Try Nix as fallback (works on Linux and macOS)
 	b, err := backend.NewNixBackend(config)
 	if err == nil {
 		return b, nil
@@ -166,7 +177,7 @@ func isFedora() bool {
 		return false
 	}
 	content := strings.ToLower(string(data))
-	return strings.Contains(content, "fedora")
+	return strings.Contains(content, "fedora") || strings.Contains(content, "rhel") || strings.Contains(content, "centos")
 }
 
 // isAlpine checks if the system is Alpine Linux
@@ -181,6 +192,23 @@ func isAlpine() bool {
 	}
 	content := strings.ToLower(string(data))
 	return strings.Contains(content, "alpine")
+}
+
+// isArchLinux checks if the system is Arch Linux
+func isArchLinux() bool {
+	// Check for /etc/arch-release
+	if _, err := os.Stat("/etc/arch-release"); err == nil {
+		return true
+	}
+
+	// Check os-release
+	data, err := os.ReadFile("/etc/os-release")
+	if err != nil {
+		return false
+	}
+	content := strings.ToLower(string(data))
+	// Covers Arch, Manjaro, EndeavourOS, etc.
+	return strings.Contains(content, "arch") || strings.Contains(content, "manjaro")
 }
 
 // isUbuntu checks if the system is Ubuntu

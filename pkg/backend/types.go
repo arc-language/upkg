@@ -28,6 +28,8 @@ const (
 	BackendDnf BackendType = "dnf"
 	// BackendChoco uses the choco package manager
 	BackendChoco BackendType = "choco"
+	// BackendPacman uses the Arch Linux package manager
+	BackendPacman BackendType = "pacman"
 	// BackendAuto automatically detects the best backend
 	BackendAuto BackendType = "auto"
 )
