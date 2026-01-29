@@ -30,6 +30,8 @@ const (
 	BackendChoco BackendType = "choco"
 	// BackendPacman uses the Arch Linux package manager
 	BackendPacman BackendType = "pacman"
+    // BackendZypper uses the OpenSUSE package manager
+    BackendZypper BackendType = "zypper"
 	// BackendAuto automatically detects the best backend
 	BackendAuto BackendType = "auto"
 )

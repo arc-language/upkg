@@ -33,6 +33,7 @@ const (
 	BackendDnf    = backend.BackendDnf
 	BackendChoco  = backend.BackendChoco
 	BackendPacman = backend.BackendPacman
+	BackendZypper = backend.BackendZypper
 	BackendAuto   = backend.BackendAuto
 )
 
@@ -73,6 +74,8 @@ func NewManager(backendType backend.BackendType, config *backend.Config) (*Manag
 		b, err = backend.NewChocoBackend(config)
 	case backend.BackendPacman:
 		b, err = backend.NewPacmanBackend(config)
+	case backend.BackendZypper:
+		b, err = backend.NewZypperBackend(config)
 	case backend.BackendAuto:
 		b, err = autoDetectBackend(config)
 	default:
@@ -129,6 +132,14 @@ func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
 		// Check if this is Arch Linux
 		if isArchLinux() {
 			b, err := backend.NewPacmanBackend(config)
+			if err == nil {
+				return b, nil
+			}
+		}
+
+		// Check if this is OpenSUSE
+		if isOpenSUSE() {
+			b, err := backend.NewZypperBackend(config)
 			if err == nil {
 				return b, nil
 			}
@@ -209,6 +220,20 @@ func isArchLinux() bool {
 	content := strings.ToLower(string(data))
 	// Covers Arch, Manjaro, EndeavourOS, etc.
 	return strings.Contains(content, "arch") || strings.Contains(content, "manjaro")
+}
+
+// isOpenSUSE checks if the system is OpenSUSE
+func isOpenSUSE() bool {
+	data, err := os.ReadFile("/etc/os-release")
+	if err != nil {
+		// Also check for /etc/SuSE-release
+		if _, err := os.Stat("/etc/SuSE-release"); err == nil {
+			return true
+		}
+		return false
+	}
+	content := strings.ToLower(string(data))
+	return strings.Contains(content, "opensuse") || strings.Contains(content, "sles")
 }
 
 // isUbuntu checks if the system is Ubuntu

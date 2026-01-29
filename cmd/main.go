@@ -15,7 +15,7 @@ import (
 
 func main() {
 	var (
-		backendName = flag.String("backend", "auto", "Backend to use (auto, nix, brew, dpkg, apt, apk, dnf, choco, pacman)")
+		backendName = flag.String("backend", "auto", "Backend to use (auto, nix, brew, dpkg, apt, apk, dnf, choco, pacman, zypper)")
 		pkgName     = flag.String("package", "", "Package name to download")
 		pkgVersion  = flag.String("version", "", "Package version (optional)")
 		platform    = flag.String("platform", "", "Target platform/architecture (optional)")
@@ -45,6 +45,7 @@ func main() {
 		fmt.Println("  apk    - Alpine package manager (Alpine Linux)")
 		fmt.Println("  dnf    - Fedora package manager (RedHat/Fedora)")
 		fmt.Println("  pacman - Arch Linux package manager (Arch/Manjaro)")
+		fmt.Println("  zypper - OpenSUSE package manager (OpenSUSE/SLES)")
 		fmt.Println("  choco  - Chocolatey package manager (Windows)")
 		fmt.Println()
 		fmt.Println("Options:")
@@ -83,9 +84,11 @@ func main() {
 		backendType = upkg.BackendChoco
 	case "pacman":
 		backendType = upkg.BackendPacman
+	case "zypper":
+		backendType = upkg.BackendZypper
 	default:
 		fmt.Printf("Unknown backend: %s\n", *backendName)
-		fmt.Println("Available backends: auto, nix, brew, dpkg, apt, apk, dnf, choco, pacman")
+		fmt.Println("Available backends: auto, nix, brew, dpkg, apt, apk, dnf, choco, pacman, zypper")
 		os.Exit(1)
 	}
 
@@ -237,7 +240,7 @@ func main() {
 
 		// Show some helpful next steps based on backend
 		switch mgr.Backend() {
-		case "brew", "dpkg", "apt", "dnf", "apk", "pacman":
+		case "brew", "dpkg", "apt", "dnf", "apk", "pacman", "zypper":
 			fmt.Printf("\n📍 Installation location: %s\n", config.InstallPath)
 			fmt.Printf("\n💡 You may need to add the following to your PATH:\n")
 			fmt.Printf("   export PATH=\"%s/bin:$PATH\"\n", config.InstallPath)
@@ -254,7 +257,7 @@ func main() {
 		// Show what was installed
 		fmt.Printf("\n📦 Installed files can be found in:\n")
 		switch mgr.Backend() {
-		case "dpkg", "apt", "dnf", "pacman":
+		case "dpkg", "apt", "dnf", "pacman", "zypper":
 			fmt.Printf("   %s/usr/bin/     - Executables\n", config.InstallPath)
 			fmt.Printf("   %s/usr/lib/     - Libraries\n", config.InstallPath)
 			fmt.Printf("   %s/usr/share/   - Shared data\n", config.InstallPath)
