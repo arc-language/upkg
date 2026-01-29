@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/blakesmith/ar"
+	"github.com/ulikunitz/xz"
 )
 
 // NewPackageManager creates a new Debian package manager
@@ -341,6 +342,7 @@ func (pm *PackageManager) extractDataTar(r io.Reader, name, installPath string) 
 
 	// Handle different compression formats
 	if strings.HasSuffix(name, ".gz") {
+		pm.logger.Printf("  Using gzip decompression")
 		gzReader, err := gzip.NewReader(r)
 		if err != nil {
 			return fmt.Errorf("creating gzip reader: %w", err)
@@ -348,11 +350,18 @@ func (pm *PackageManager) extractDataTar(r io.Reader, name, installPath string) 
 		defer gzReader.Close()
 		tarReader = tar.NewReader(gzReader)
 	} else if strings.HasSuffix(name, ".xz") {
-		// For .xz files, we need to use external decompression or a library
-		// For now, we'll just support .gz and uncompressed
-		return fmt.Errorf("xz compression not yet supported, please extract manually")
+		pm.logger.Printf("  Using xz decompression")
+		xzReader, err := xz.NewReader(r)
+		if err != nil {
+			return fmt.Errorf("creating xz reader: %w", err)
+		}
+		tarReader = tar.NewReader(xzReader)
+	} else if strings.HasSuffix(name, ".zst") {
+		// zstd compression - we can add this if needed
+		return fmt.Errorf("zstd compression not yet supported, please install github.com/klauspost/compress/zstd")
 	} else {
 		// Assume uncompressed tar
+		pm.logger.Printf("  Using uncompressed tar")
 		tarReader = tar.NewReader(r)
 	}
 
