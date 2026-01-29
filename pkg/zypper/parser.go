@@ -31,7 +31,6 @@ func ParseRepomd(r io.Reader) (string, error) {
 // filename is used to determine compression type (gz or zst)
 func ParsePrimary(r io.Reader, filename string, repoName string) ([]*PackageInfo, error) {
 	var xmlReader io.Reader
-	var err error
 
 	// Handle compression based on file extension
 	if strings.HasSuffix(filename, ".zst") {
