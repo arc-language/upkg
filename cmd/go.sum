@@ -12,6 +12,8 @@ github.com/arc-language/upkg v0.0.0-20260129002827-fe94d35b3492 h1:S2BTQV7u5SjK0
 github.com/arc-language/upkg v0.0.0-20260129002827-fe94d35b3492/go.mod h1:IG4Ujj4VVEKGv3/x6+s19wq5jDZoYrB5YupCxLB0TOc=
 github.com/arc-language/upkg v0.0.0-20260129003155-0dc60d567fb4 h1:cp64gT0XXq3TUJg8W7V1/ZVFrm4zP5kzxgkkGNnTwA8=
 github.com/arc-language/upkg v0.0.0-20260129003155-0dc60d567fb4/go.mod h1:IG4Ujj4VVEKGv3/x6+s19wq5jDZoYrB5YupCxLB0TOc=
+github.com/arc-language/upkg v0.0.0-20260129003442-7b1e1ef53374 h1:lsoho1SwKLA62P+sCjVqtdKxRw2bN4B4CgSSy40nVmc=
+github.com/arc-language/upkg v0.0.0-20260129003442-7b1e1ef53374/go.mod h1:IG4Ujj4VVEKGv3/x6+s19wq5jDZoYrB5YupCxLB0TOc=
 github.com/ulikunitz/xz v0.5.15 h1:9DNdB5s+SgV3bQ2ApL10xRc35ck0DuIX/isZvIk+ubY=
 github.com/ulikunitz/xz v0.5.15/go.mod h1:nbz6k7qbPmH4IRqmfOplQw/tblSgqTqBwxkY0oWt/14=
 zombiezen.com/go/nix v0.0.0-20250514174927-d97ab08b45de h1:X37qVOQIIuiEfWf+P4bMpaVPKr9mdwmj2sj3dj7UY18=

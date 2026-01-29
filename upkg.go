@@ -24,6 +24,7 @@ type (
 const (
 	BackendNix  = backend.BackendNix
 	BackendBrew = backend.BackendBrew
+	BackendDpkg = backend.BackendDpkg
 	BackendAuto = backend.BackendAuto
 )
 
@@ -47,11 +48,14 @@ func NewManager(backendType backend.BackendType, config *backend.Config) (*Manag
 	var b backend.Backend
 	var err error
 
+	// In NewManager function, add case for dpkg:
 	switch backendType {
 	case backend.BackendNix:
 		b, err = backend.NewNixBackend(config)
 	case backend.BackendBrew:
 		b, err = backend.NewBrewBackend(config)
+	case backend.BackendDpkg:
+		b, err = backend.NewDpkgBackend(config)
 	case backend.BackendAuto:
 		b, err = autoDetectBackend(config)
 	default:
@@ -68,12 +72,20 @@ func NewManager(backendType backend.BackendType, config *backend.Config) (*Manag
 	}, nil
 }
 
-// autoDetectBackend automatically selects the best backend for the current system
+// In autoDetectBackend function, add dpkg detection:
 func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
 	// Check if Homebrew is available (macOS or Linux with Homebrew)
 	if runtime.GOOS == "darwin" {
 		// Prefer Homebrew on macOS
 		b, err := backend.NewBrewBackend(config)
+		if err == nil {
+			return b, nil
+		}
+	}
+
+	// Try dpkg on Linux
+	if runtime.GOOS == "linux" {
+		b, err := backend.NewDpkgBackend(config)
 		if err == nil {
 			return b, nil
 		}

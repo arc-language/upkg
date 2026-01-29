@@ -18,6 +18,8 @@ const (
 	BackendNix BackendType = "nix"
 	// BackendBrew uses the Homebrew package manager
 	BackendBrew BackendType = "brew"
+	// BackendDpkg uses the Debian package manager
+	BackendDpkg BackendType = "dpkg"
 	// BackendAuto automatically detects the best backend
 	BackendAuto BackendType = "auto"
 )
