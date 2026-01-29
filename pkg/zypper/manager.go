@@ -211,9 +211,7 @@ func (pm *PackageManager) verifyHash(path, expected, hashType string) error {
 	}
 	defer f.Close()
 
-	var hasher io.Writer
 	var sum []byte
-	var actual string
 
 	pm.logger.Printf("  Verifying %s hash...", hashType)
 
@@ -234,7 +232,7 @@ func (pm *PackageManager) verifyHash(path, expected, hashType string) error {
 		return nil
 	}
 
-	actual = hex.EncodeToString(sum)
+	actual := hex.EncodeToString(sum)
 	if actual != expected {
 		return fmt.Errorf("hash mismatch: want %s, got %s", expected, actual)
 	}
