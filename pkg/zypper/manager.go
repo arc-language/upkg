@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/cavaliergopher/cpio"
 	"github.com/klauspost/compress/zstd"
+	"github.com/ulikunitz/xz"
 )
 
 func NewPackageManager(cfg *Config) *PackageManager {
@@ -87,8 +89,6 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 	repoBaseURL := fmt.Sprintf("%s/%s/%s", pm.config.MirrorURL, pm.config.Distribution, pkg.Repository)
 	
 	// Ensure no double slashes if Repo is handled differently in caching
-	// In findPackage, we stored the raw repo path. 
-	// Often packages in XML have location href="aarch64/pkg.rpm"
 	downloadURL := fmt.Sprintf("%s/%s", repoBaseURL, pkg.Location)
 
 	destPath := filepath.Join(pm.config.CachePath, "downloads", filepath.Base(pkg.Location))
@@ -100,13 +100,9 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 
 	// 4. Verify
 	if opts.VerifyHash && pkg.Checksum != "" {
-		// Zypper primary.xml usually uses SHA256, but check 'type'
-		if pkg.ChecksumType == "sha256" {
-			if err := pm.verifyHash(destPath, pkg.Checksum); err != nil {
-				return err
-			}
-		} else {
-			pm.logger.Printf("  Skipping verification (unsupported hash type: %s)", pkg.ChecksumType)
+		// Zypper primary.xml can use sha256 or sha512
+		if err := pm.verifyHash(destPath, pkg.Checksum, pkg.ChecksumType); err != nil {
+			return err
 		}
 	}
 
@@ -125,7 +121,6 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 	return nil
 }
 
-// Find the updateDB function and replace it with this updated version:
 func (pm *PackageManager) updateDB(ctx context.Context, arch string) error {
 	if len(pm.cache.packages) > 0 && time.Since(pm.cache.lastUpdate) < pm.cache.cacheDuration {
 		return nil
@@ -136,7 +131,6 @@ func (pm *PackageManager) updateDB(ctx context.Context, arch string) error {
 
 	for _, repoPath := range pm.config.Repos {
 		// 1. Get repomd.xml
-		// URL: http://mirror/distribution/repo/oss/repodata/repomd.xml
 		baseURL := fmt.Sprintf("%s/%s/%s", pm.config.MirrorURL, pm.config.Distribution, repoPath)
 		repomdURL := fmt.Sprintf("%s/repodata/repomd.xml", baseURL)
 
@@ -165,7 +159,7 @@ func (pm *PackageManager) updateDB(ctx context.Context, arch string) error {
 			continue
 		}
 
-		// FIXED: Pass primaryLoc (filename) so parser knows to use zstd or gzip
+		// Pass primaryLoc (filename) so parser knows to use zstd or gzip
 		pkgs, err := ParsePrimary(primaryBody, primaryLoc, repoPath)
 		primaryBody.Close()
 		if err != nil {
@@ -210,21 +204,42 @@ func (pm *PackageManager) downloadFile(ctx context.Context, url, path string) er
 	return err
 }
 
-func (pm *PackageManager) verifyHash(path, expected string) error {
+func (pm *PackageManager) verifyHash(path, expected, hashType string) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
-	hasher := sha256.New()
-	if _, err := io.Copy(hasher, f); err != nil {
-		return err
+	var hasher io.Writer
+	var sum []byte
+	var actual string
+
+	pm.logger.Printf("  Verifying %s hash...", hashType)
+
+	if hashType == "sha512" {
+		h := sha512.New()
+		if _, err := io.Copy(h, f); err != nil {
+			return err
+		}
+		sum = h.Sum(nil)
+	} else if hashType == "sha256" {
+		h := sha256.New()
+		if _, err := io.Copy(h, f); err != nil {
+			return err
+		}
+		sum = h.Sum(nil)
+	} else {
+		pm.logger.Printf("  ⚠️ Skipping verification (unsupported hash type: %s)", hashType)
+		return nil
 	}
-	actual := hex.EncodeToString(hasher.Sum(nil))
+
+	actual = hex.EncodeToString(sum)
 	if actual != expected {
 		return fmt.Errorf("hash mismatch: want %s, got %s", expected, actual)
 	}
+	
+	pm.logger.Printf("  ✓ Hash verified")
 	return nil
 }
 
@@ -238,9 +253,10 @@ func (pm *PackageManager) extractRPM(rpmPath, dest string) error {
 	defer f.Close()
 
 	// 1. Find the start of the compressed CPIO archive.
-	// We look for GZIP magic bytes (0x1f 0x8b) or Zstd magic bytes (0x28 0xb5 0x2f 0xfd)
-	// Scanning the first 20KB should be enough to skip RPM headers.
-	buf := make([]byte, 20480) 
+	// We look for GZIP (1f 8b), Zstd (28 b5 2f fd), or XZ (fd 37 7a 58 5a 00)
+	// Scanning the first 1MB should be enough to skip RPM headers.
+	scanSize := 1024 * 1024 // 1MB buffer
+	buf := make([]byte, scanSize) 
 	n, err := f.Read(buf)
 	if err != nil && err != io.EOF {
 		return err
@@ -249,7 +265,7 @@ func (pm *PackageManager) extractRPM(rpmPath, dest string) error {
 	var offset int64 = -1
 	var format string
 
-	for i := 0; i < n-4; i++ {
+	for i := 0; i < n-6; i++ {
 		// Check for GZIP
 		if buf[i] == 0x1f && buf[i+1] == 0x8b {
 			offset = int64(i)
@@ -262,10 +278,16 @@ func (pm *PackageManager) extractRPM(rpmPath, dest string) error {
 			format = "zstd"
 			break
 		}
+		// Check for XZ
+		if buf[i] == 0xfd && buf[i+1] == 0x37 && buf[i+2] == 0x7a && buf[i+3] == 0x58 && buf[i+4] == 0x5a && buf[i+5] == 0x00 {
+			offset = int64(i)
+			format = "xz"
+			break
+		}
 	}
 
 	if offset == -1 {
-		return fmt.Errorf("could not find compressed archive within RPM")
+		return fmt.Errorf("could not find compressed archive within RPM (scanned %d bytes)", n)
 	}
 
 	pm.logger.Printf("  Found %s archive at offset %d", format, offset)
@@ -287,6 +309,12 @@ func (pm *PackageManager) extractRPM(rpmPath, dest string) error {
 		}
 		defer zs.Close()
 		reader = zs
+	} else if format == "xz" {
+		x, err := xz.NewReader(f)
+		if err != nil {
+			return err
+		}
+		reader = x
 	}
 
 	// 3. Extract CPIO
@@ -313,9 +341,7 @@ func (pm *PackageManager) extractRPM(rpmPath, dest string) error {
 		os.MkdirAll(filepath.Dir(target), 0755)
 
 		if header.Mode.IsRegular() {
-			// FIXED: Cast to os.FileMode to fix type mismatch
 			perm := os.FileMode(header.Mode & 0777)
-			
 			outFile, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, perm)
 			if err != nil {
 				return err
@@ -325,8 +351,7 @@ func (pm *PackageManager) extractRPM(rpmPath, dest string) error {
 				return err
 			}
 			outFile.Close()
-		} else if (header.Mode & 0170000) == 0120000 { // FIXED: Use octal for symlink check
-			// Handle symlinks
+		} else if (header.Mode & 0170000) == 0120000 { // Symlink
 			if header.Linkname != "" {
 				os.Remove(target)
 				os.Symlink(header.Linkname, target)
