@@ -1,6 +1,3 @@
-Here is the updated `README.md`. It reflects the new subcommand structure (`install`, `search`, `info`) found in your `main.go` and includes all the new backends you have implemented (Apt, Dnf, Pacman, Zypper, Chocolatey, etc.).
-
-```markdown
 <h1 align="center">
   <img src="./.github/upkg_logo.jpg" alt="upkg" width="200px">
 </h1>
@@ -198,4 +195,3 @@ upkg/
 ## License
 
 Licensed under the MIT License.
-```
