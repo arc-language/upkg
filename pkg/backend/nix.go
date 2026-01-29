@@ -4,6 +4,7 @@ package backend
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/arc-language/upkg/pkg/nix"
 )
@@ -41,46 +42,81 @@ func NewNixBackend(config *Config) (*NixBackend, error) {
 }
 
 // Download downloads a package using Nix
+// Note: pkg.Name should be the Nix attribute name (e.g., "ffmpeg", "python313Packages.numpy")
 func (b *NixBackend) Download(ctx context.Context, pkg *Package, opts *DownloadOptions) error {
+	// Build the attribute name
+	// If pkg.Name is already a full attribute (contains '.'), use it as-is
+	// Otherwise, use it directly as the attribute
+	attribute := pkg.Name
+
 	nixOpts := &nix.DownloadOptions{
-		StoreHash:   pkg.Hash,
 		Extract:     derefBool(opts.Extract, true),
 		KeepArchive: derefBool(opts.KeepArchive, false),
 		VerifyHash:  derefBool(opts.VerifyHash, true),
 	}
 
-	if opts.Platform != "" {
-		nixOpts.Platform = nix.Platform(opts.Platform)
+	// If specific outputs are requested via pkg.Hash (as a comma-separated list), parse them
+	// This is a workaround since the old API used Hash for store hash
+	if pkg.Hash != "" {
+		outputs := strings.Split(pkg.Hash, ",")
+		nixOpts.Outputs = outputs
 	}
 
-	return b.manager.Download(ctx, pkg.Name, pkg.Version, nixOpts)
+	return b.manager.Download(ctx, attribute, nixOpts)
 }
 
 // GetInfo retrieves package information from Nix
 func (b *NixBackend) GetInfo(ctx context.Context, name string) (*PackageInfo, error) {
-	platform, err := nix.DetectPlatform()
+	// Lookup package in the static registry
+	pkg, err := b.manager.LookupPackage(name)
 	if err != nil {
-		return nil, fmt.Errorf("detecting platform: %w", err)
+		return nil, fmt.Errorf("looking up package: %w", err)
 	}
 
-	outputs, resolvedName, err := b.manager.ResolvePackageName(ctx, name, platform)
-	if err != nil {
-		return nil, fmt.Errorf("resolving package: %w", err)
-	}
+	// Parse the store path to get all available outputs
+	outputs := parseStorePath(pkg.StorePath)
 
 	return &PackageInfo{
-		Name:        name,
-		Version:     resolvedName,
-		Description: "", // Nix doesn't provide this easily via Hydra
+		Name:        pkg.Attribute,
+		Version:     pkg.NameVersion,
+		Description: "", // Not available in static registry
 		Outputs:     outputs,
-		Platforms:   []string{platform.String()},
+		Platforms:   []string{"x86_64-linux"}, // Only supported platform
 		Backend:     "nix",
 	}, nil
 }
 
-// Search is not implemented for Nix backend yet
+// Search searches for packages in the Nix registry
+// This is a simple substring match against attribute names
 func (b *NixBackend) Search(ctx context.Context, query string) ([]*PackageInfo, error) {
-	return nil, fmt.Errorf("search not implemented for Nix backend")
+	query = strings.ToLower(query)
+	var results []*PackageInfo
+
+	// Simple linear search through the registry
+	// For better performance, consider building an index
+	for attr, pkg := range nix.X86_64LinuxPackages {
+		if strings.Contains(strings.ToLower(attr), query) ||
+			strings.Contains(strings.ToLower(pkg.NameVersion), query) {
+			
+			outputs := parseStorePath(pkg.StorePath)
+			
+			results = append(results, &PackageInfo{
+				Name:        pkg.Attribute,
+				Version:     pkg.NameVersion,
+				Description: "",
+				Outputs:     outputs,
+				Platforms:   []string{"x86_64-linux"},
+				Backend:     "nix",
+			})
+
+			// Limit results to avoid overwhelming output
+			if len(results) >= 100 {
+				break
+			}
+		}
+	}
+
+	return results, nil
 }
 
 // Name returns the backend name
@@ -91,4 +127,49 @@ func (b *NixBackend) Name() string {
 // Close cleans up resources
 func (b *NixBackend) Close() error {
 	return nil
+}
+
+// parseStorePath parses a StorePath field into a map of outputs
+// Format: "bin=/nix/store/hash-name;dev=/nix/store/hash-name;/nix/store/hash-name"
+func parseStorePath(storePath string) map[string]string {
+	outputs := make(map[string]string)
+	parts := strings.Split(storePath, ";")
+
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		if strings.Contains(part, "=") {
+			// Named output: "bin=/nix/store/hash-name"
+			kv := strings.SplitN(part, "=", 2)
+			outputName := kv[0]
+			fullPath := kv[1]
+
+			// Extract hash from "/nix/store/hash-name-version"
+			pathWithoutPrefix := strings.TrimPrefix(fullPath, "/nix/store/")
+			hashParts := strings.SplitN(pathWithoutPrefix, "-", 2)
+			if len(hashParts) > 0 {
+				outputs[outputName] = hashParts[0]
+			}
+		} else {
+			// Default output: "/nix/store/hash-name"
+			pathWithoutPrefix := strings.TrimPrefix(part, "/nix/store/")
+			hashParts := strings.SplitN(pathWithoutPrefix, "-", 2)
+			if len(hashParts) > 0 {
+				outputs["out"] = hashParts[0]
+			}
+		}
+	}
+
+	return outputs
+}
+
+// derefBool dereferences a bool pointer with a default value
+func derefBool(ptr *bool, def bool) bool {
+	if ptr == nil {
+		return def
+	}
+	return *ptr
 }
