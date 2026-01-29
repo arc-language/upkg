@@ -444,3 +444,7 @@ func getKeys(m map[string]string) []string {
 	}
 	return keys
 }
+
+func GetPackageRegistry() map[string]Package {
+	return x86_64_linux_Packages
+}

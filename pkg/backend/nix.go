@@ -55,11 +55,9 @@ func (b *NixBackend) Download(ctx context.Context, pkg *Package, opts *DownloadO
 		VerifyHash:  derefBool(opts.VerifyHash, true),
 	}
 
-	// If specific outputs are requested via pkg.Hash (as a comma-separated list), parse them
-	// This is a workaround since the old API used Hash for store hash
-	if pkg.Hash != "" {
-		outputs := strings.Split(pkg.Hash, ",")
-		nixOpts.Outputs = outputs
+	// If specific outputs are requested via pkg.Output, use it
+	if pkg.Output != "" {
+		nixOpts.Outputs = []string{pkg.Output}
 	}
 
 	return b.manager.Download(ctx, attribute, nixOpts)
@@ -92,9 +90,12 @@ func (b *NixBackend) Search(ctx context.Context, query string) ([]*PackageInfo, 
 	query = strings.ToLower(query)
 	var results []*PackageInfo
 
+	// Get the package registry
+	registry := nix.GetPackageRegistry()
+	
 	// Simple linear search through the registry
 	// For better performance, consider building an index
-	for attr, pkg := range nix.X86_64LinuxPackages {
+	for attr, pkg := range registry {
 		if strings.Contains(strings.ToLower(attr), query) ||
 			strings.Contains(strings.ToLower(pkg.NameVersion), query) {
 			
@@ -164,12 +165,4 @@ func parseStorePath(storePath string) map[string]string {
 	}
 
 	return outputs
-}
-
-// derefBool dereferences a bool pointer with a default value
-func derefBool(ptr *bool, def bool) bool {
-	if ptr == nil {
-		return def
-	}
-	return *ptr
 }
