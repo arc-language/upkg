@@ -196,6 +196,8 @@ func (pm *PackageManager) updatePackageIndex(ctx context.Context, arch Architect
 	repositories := []string{"main", "community"}
 
 	totalPackages := 0
+	var lastErr error
+
 	for _, repo := range repositories {
 		// Construct URL for APKINDEX.tar.gz
 		url := fmt.Sprintf("%s/%s/%s/%s/APKINDEX.tar.gz",
@@ -210,6 +212,7 @@ func (pm *PackageManager) updatePackageIndex(ctx context.Context, arch Architect
 		resp, err := pm.client.Get(ctx, url)
 		if err != nil {
 			pm.logger.Printf("  ⚠️  Warning: failed to fetch %s repository: %v", repo, err)
+			lastErr = err
 			continue
 		}
 
@@ -218,6 +221,7 @@ func (pm *PackageManager) updatePackageIndex(ctx context.Context, arch Architect
 		resp.Body.Close()
 		if err != nil {
 			pm.logger.Printf("  ⚠️  Warning: failed to parse %s repository: %v", repo, err)
+			lastErr = err
 			continue
 		}
 
@@ -230,6 +234,13 @@ func (pm *PackageManager) updatePackageIndex(ctx context.Context, arch Architect
 		}
 
 		totalPackages += len(packages)
+	}
+
+	if totalPackages == 0 {
+		if lastErr != nil {
+			return fmt.Errorf("failed to fetch any packages: %w", lastErr)
+		}
+		return fmt.Errorf("no packages found in any repository")
 	}
 
 	pm.logger.Printf("  Total packages indexed: %d", totalPackages)

@@ -26,6 +26,8 @@ github.com/arc-language/upkg v0.0.0-20260129032328-67d1efa55221 h1:waWR3wk0LetBE
 github.com/arc-language/upkg v0.0.0-20260129032328-67d1efa55221/go.mod h1:IG4Ujj4VVEKGv3/x6+s19wq5jDZoYrB5YupCxLB0TOc=
 github.com/arc-language/upkg v0.0.0-20260129032700-aac487b0ac1f h1:ZmIgdhs1IDdn6dT4H5nI/8JEfCtRX+CMxOAnE9fG+Zc=
 github.com/arc-language/upkg v0.0.0-20260129032700-aac487b0ac1f/go.mod h1:IG4Ujj4VVEKGv3/x6+s19wq5jDZoYrB5YupCxLB0TOc=
+github.com/arc-language/upkg v0.0.0-20260129033957-fe1bb05539e1 h1:gb+KJMGjpcMjLSQ20rVef497u/UYkj6yXUprby2zvbo=
+github.com/arc-language/upkg v0.0.0-20260129033957-fe1bb05539e1/go.mod h1:IG4Ujj4VVEKGv3/x6+s19wq5jDZoYrB5YupCxLB0TOc=
 github.com/blakesmith/ar v0.0.0-20190502131153-809d4375e1fb h1:m935MPodAbYS46DG4pJSv7WO+VECIWUQ7OJYSoTrMh4=
 github.com/blakesmith/ar v0.0.0-20190502131153-809d4375e1fb/go.mod h1:PkYb9DJNAwrSvRx5DYA+gUcOIgTGVMNkfSCbZM8cWpI=
 github.com/klauspost/compress v1.18.3 h1:9PJRvfbmTabkOX8moIpXPbMMbYN60bWImDDU7L+/6zw=

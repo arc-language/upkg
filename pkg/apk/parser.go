@@ -23,9 +23,14 @@ func ParseAPKINDEX(r io.Reader) ([]*PackageInfo, error) {
 	tarReader := tar.NewReader(gzReader)
 
 	// Read the first (and only) file from the tar
-	_, err = tarReader.Next()
+	header, err := tarReader.Next()
 	if err != nil {
 		return nil, fmt.Errorf("reading tar entry: %w", err)
+	}
+
+	// Verify we're reading the APKINDEX file
+	if header.Name != "APKINDEX" && header.Name != "./APKINDEX" {
+		return nil, fmt.Errorf("unexpected file in tar: %s (expected APKINDEX)", header.Name)
 	}
 
 	return parseAPKINDEXContent(tarReader)
@@ -38,9 +43,11 @@ func parseAPKINDEXContent(r io.Reader) ([]*PackageInfo, error) {
 
 	var packages []*PackageInfo
 	var current *PackageInfo
+	lineNum := 0
 
 	for scanner.Scan() {
 		line := scanner.Text()
+		lineNum++
 
 		// Empty line indicates end of package stanza
 		if line == "" {
@@ -52,12 +59,21 @@ func parseAPKINDEXContent(r io.Reader) ([]*PackageInfo, error) {
 		}
 
 		// Each line is in format "X:value" where X is a single character field code
-		if len(line) < 2 || line[1] != ':' {
+		if len(line) < 2 {
+			continue
+		}
+
+		// Handle lines that don't have the colon separator
+		if line[1] != ':' {
+			// Skip malformed lines
 			continue
 		}
 
 		field := line[0]
-		value := strings.TrimSpace(line[2:])
+		value := ""
+		if len(line) > 2 {
+			value = strings.TrimSpace(line[2:])
+		}
 
 		// Start new package if we see P: field
 		if field == 'P' {
@@ -70,6 +86,7 @@ func parseAPKINDEXContent(r io.Reader) ([]*PackageInfo, error) {
 			continue
 		}
 
+		// Skip if we haven't started a package yet
 		if current == nil {
 			continue
 		}
@@ -105,12 +122,18 @@ func parseAPKINDEXContent(r io.Reader) ([]*PackageInfo, error) {
 		case 'c': // Commit
 			current.Commit = value
 		case 'D': // Dependencies
-			current.Depends = parseAPKList(value)
+			if value != "" {
+				current.Depends = parseAPKList(value)
+			}
 		case 'p': // Provides
-			current.Provides = parseAPKList(value)
+			if value != "" {
+				current.Provides = parseAPKList(value)
+			}
 		case 'i': // Install if
-			current.InstallIf = parseAPKList(value)
-		case 'C': // Checksum (SHA256)
+			if value != "" {
+				current.InstallIf = parseAPKList(value)
+			}
+		case 'C': // Checksum (SHA1 with Q1 prefix)
 			current.Checksum = value
 		}
 	}
@@ -121,7 +144,11 @@ func parseAPKINDEXContent(r io.Reader) ([]*PackageInfo, error) {
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scanning APKINDEX: %w", err)
+		return nil, fmt.Errorf("scanning APKINDEX at line %d: %w", lineNum, err)
+	}
+
+	if len(packages) == 0 {
+		return nil, fmt.Errorf("no packages found in APKINDEX (read %d lines)", lineNum)
 	}
 
 	return packages, nil
@@ -132,16 +159,20 @@ func parseAPKList(s string) []string {
 	if s == "" {
 		return nil
 	}
-	
+
 	var result []string
 	parts := strings.Fields(s)
 	for _, part := range parts {
-		// Remove version constraints like >=1.0
-		if idx := strings.IndexAny(part, ">=<~"); idx > 0 {
-			part = part[:idx]
+		// Remove version constraints like >=1.0, <2.0, ~1.0
+		cleaned := part
+		for i, ch := range part {
+			if ch == '>' || ch == '<' || ch == '=' || ch == '~' {
+				cleaned = part[:i]
+				break
+			}
 		}
-		if part != "" {
-			result = append(result, part)
+		if cleaned != "" {
+			result = append(result, cleaned)
 		}
 	}
 	return result
