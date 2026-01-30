@@ -1,4 +1,5 @@
 // cmd/upkg/main.go
+// export PATH="$PWD:$PATH"
 package main
 
 import (
@@ -14,6 +15,7 @@ import (
 )
 
 var envManager *env.EnvironmentManager
+
 
 func main() {
     envManager = env.NewEnvironmentManager("")
@@ -157,6 +159,24 @@ upkg() {
             return 1
         fi
         
+        # SAVE ORIGINAL PATH on first activation
+        if [[ -z "$UPKG_ORIGINAL_PATH" ]]; then
+            export UPKG_ORIGINAL_PATH="$PATH"
+        fi
+        
+        # AGGRESSIVELY CLEAR old upkg environment
+        if [[ -n "$UPKG_ENV" ]]; then
+            # Remove old environment paths from PATH
+            export PATH="$UPKG_ORIGINAL_PATH"
+        fi
+        
+        # Clear all upkg-related variables
+        unset LD_LIBRARY_PATH
+        unset LIBRARY_PATH
+        unset C_INCLUDE_PATH
+        unset CPLUS_INCLUDE_PATH
+        unset PKG_CONFIG_PATH
+        
         # Call upkg to activate and get shell code
         command upkg env activate "$3" > /dev/null 2>&1
         
@@ -165,7 +185,7 @@ upkg() {
             return 1
         fi
         
-        # Source the environment
+        # Source the environment (even if empty)
         eval "$(command upkg shell)"
         
         # Set environment variable for prompt
@@ -174,13 +194,19 @@ upkg() {
     elif [[ "$1" == "env" ]] && [[ "$2" == "deactivate" ]]; then
         # Deactivation
         command upkg env deactivate
-        unset UPKG_ENV
         
-        # Clear the environment by reloading shell defaults
-        if [[ -n "$UPKG_OLD_PATH" ]]; then
-            export PATH="$UPKG_OLD_PATH"
-            unset UPKG_OLD_PATH
+        # Restore original PATH
+        if [[ -n "$UPKG_ORIGINAL_PATH" ]]; then
+            export PATH="$UPKG_ORIGINAL_PATH"
         fi
+        
+        # Clear all upkg variables
+        unset UPKG_ENV
+        unset LD_LIBRARY_PATH
+        unset LIBRARY_PATH
+        unset C_INCLUDE_PATH
+        unset CPLUS_INCLUDE_PATH
+        unset PKG_CONFIG_PATH
         
     else
         # For all other commands, just call the binary
