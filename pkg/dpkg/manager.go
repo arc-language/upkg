@@ -82,13 +82,13 @@ func NewPackageManager(cfg *Config) *PackageManager {
 	return pm
 }
 
-// Download downloads and installs a Debian package
+// Download downloads and installs a Debian package and its dependencies
 func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) error {
 	if opts == nil || opts.Package == "" {
 		return fmt.Errorf("Package is required in DownloadOptions")
 	}
 
-	pm.logger.Printf("Starting download for package: %s", opts.Package)
+	pm.logger.Printf("Starting installation for package: %s", opts.Package)
 
 	// Set defaults
 	if opts.Architecture == "" {
@@ -104,77 +104,84 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 		}
 	}
 
-	pm.logger.Printf("Download options:")
-	pm.logger.Printf("  Package: %s", opts.Package)
-	pm.logger.Printf("  Version: %s", opts.Version)
-	pm.logger.Printf("  Architecture: %s", opts.Architecture)
-	pm.logger.Printf("  Extract: %v", opts.Extract)
-	pm.logger.Printf("  KeepArchive: %v", opts.KeepArchive)
-	pm.logger.Printf("  VerifyHash: %v", opts.VerifyHash)
-
-	// 1. Update package index if needed
-	pm.logger.Printf("Step 1: Updating package index...")
+	// 1. Update package index once at the top level
+	pm.logger.Printf("Updating package index...")
 	if err := pm.updatePackageIndex(ctx, opts.Architecture); err != nil {
 		return fmt.Errorf("updating package index: %w", err)
 	}
-	pm.logger.Printf("  ✓ Package index updated")
+	pm.logger.Printf("✓ Package index updated")
 
-	// 2. Find package info
-	pm.logger.Printf("Step 2: Finding package info...")
+	// Track installed packages to avoid loops
+	visited := make(map[string]bool)
+
+	// Start recursive installation
+	return pm.installRecursive(ctx, opts, visited)
+}
+
+// installRecursive handles the actual download, dependency resolution, and extraction
+func (pm *PackageManager) installRecursive(ctx context.Context, opts *DownloadOptions, visited map[string]bool) error {
+	// Skip if already visited in this transaction
+	if visited[opts.Package] {
+		return nil
+	}
+	visited[opts.Package] = true
+
+	pm.logger.Printf("Processing package: %s", opts.Package)
+
+	// 1. Find package info
 	pkgInfo, err := pm.findPackage(opts.Package, opts.Version, opts.Architecture)
 	if err != nil {
-		return fmt.Errorf("finding package: %w", err)
+		return fmt.Errorf("finding package %s: %w", opts.Package, err)
 	}
-	pm.logger.Printf("  ✓ Package found: %s %s", pkgInfo.Package, pkgInfo.Version)
-	pm.logger.Printf("    Description: %s", strings.Split(pkgInfo.Description, "\n")[0])
-	pm.logger.Printf("    Size: %d bytes", pkgInfo.Size)
+
+	// 2. Resolve and install dependencies FIRST
+	if len(pkgInfo.Depends) > 0 {
+		pm.logger.Printf("Resolving dependencies for %s...", opts.Package)
+		for _, depName := range pkgInfo.Depends {
+			pm.logger.Printf("  -> Dependency: %s", depName)
+			
+			depOpts := *opts // Shallow copy options
+			depOpts.Package = depName
+			depOpts.Version = "" // Use latest/default version for dependency
+			
+			if err := pm.installRecursive(ctx, &depOpts, visited); err != nil {
+				// Log warning but proceed, as some deps might be virtual/optional/pre-installed
+				pm.logger.Printf("  ⚠️  Warning: failed to install dependency %s: %v", depName, err)
+			}
+		}
+	}
 
 	// 3. Download package
-	pm.logger.Printf("Step 3: Downloading package...")
+	pm.logger.Printf("Downloading %s...", pkgInfo.Package)
 	debPath := filepath.Join(pm.config.CachePath, "downloads",
 		fmt.Sprintf("%s_%s_%s.deb", pkgInfo.Package, pkgInfo.Version, pkgInfo.Architecture))
 
 	downloadURL := fmt.Sprintf("%s/%s", pm.config.RepositoryURL, pkgInfo.Filename)
 	if err := pm.downloadPackage(ctx, downloadURL, debPath); err != nil {
-		return fmt.Errorf("downloading package: %w", err)
+		return fmt.Errorf("downloading package %s: %w", pkgInfo.Package, err)
 	}
-	pm.logger.Printf("  ✓ Download complete")
 
 	// 4. Verify hash
 	if opts.VerifyHash && pkgInfo.SHA256 != "" {
-		pm.logger.Printf("Step 4: Verifying SHA256 hash...")
 		if err := pm.verifyFileHash(debPath, pkgInfo.SHA256); err != nil {
-			return fmt.Errorf("hash verification failed: %w", err)
+			return fmt.Errorf("hash verification failed for %s: %w", pkgInfo.Package, err)
 		}
-		pm.logger.Printf("  ✓ Hash verified")
-	} else {
-		pm.logger.Printf("Step 4: Skipping hash verification")
 	}
 
 	// 5. Extract package
 	if opts.Extract {
-		pm.logger.Printf("Step 5: Extracting package...")
+		pm.logger.Printf("Extracting %s...", pkgInfo.Package)
 		if err := pm.extractDebPackage(debPath, pm.config.InstallPath); err != nil {
-			return fmt.Errorf("extracting package: %w", err)
+			return fmt.Errorf("extracting package %s: %w", pkgInfo.Package, err)
 		}
-		pm.logger.Printf("  ✓ Extraction complete")
 
 		// 6. Cleanup archive if requested
 		if !opts.KeepArchive {
-			pm.logger.Printf("Step 6: Removing archive file...")
-			if err := os.Remove(debPath); err != nil {
-				pm.logger.Printf("  ⚠️  Warning: failed to remove archive: %v", err)
-			} else {
-				pm.logger.Printf("  ✓ Archive removed")
-			}
-		} else {
-			pm.logger.Printf("Step 6: Keeping archive file as requested")
+			os.Remove(debPath)
 		}
-	} else {
-		pm.logger.Printf("Step 5: Skipping extraction (Extract=false)")
 	}
 
-	pm.logger.Printf("✓ Package %s installed successfully", opts.Package)
+	pm.logger.Printf("✓ Installed %s", pkgInfo.Package)
 	return nil
 }
 
@@ -188,36 +195,47 @@ func (pm *PackageManager) updatePackageIndex(ctx context.Context, arch Architect
 
 	pm.logger.Printf("Fetching package index from repository...")
 
-	// Construct URL for Packages.gz
-	url := fmt.Sprintf("%s/dists/%s/%s/binary-%s/Packages.gz",
-		pm.config.RepositoryURL,
-		pm.config.Release,
-		pm.config.Component,
-		arch)
+	// Common Debian components to search
+	components := []string{"main", "contrib", "non-free", "non-free-firmware"}
+	
+	totalPackages := 0
+	for _, component := range components {
+		// Construct URL for Packages.gz
+		url := fmt.Sprintf("%s/dists/%s/%s/binary-%s/Packages.gz",
+			pm.config.RepositoryURL,
+			pm.config.Release,
+			component,
+			arch)
 
-	pm.logger.Printf("  URL: %s", url)
+		pm.logger.Printf("  Fetching %s component: %s", component, url)
 
-	// Download and decompress
-	reader, err := pm.client.GetGzipped(ctx, url)
-	if err != nil {
-		return fmt.Errorf("fetching packages index: %w", err)
+		// Download and decompress
+		reader, err := pm.client.GetGzipped(ctx, url)
+		if err != nil {
+			pm.logger.Printf("  ⚠️  Warning: failed to fetch %s component: %v", component, err)
+			continue
+		}
+
+		// Parse packages
+		packages, err := ParsePackages(reader)
+		reader.Close()
+		if err != nil {
+			pm.logger.Printf("  ⚠️  Warning: failed to parse %s component: %v", component, err)
+			continue
+		}
+
+		// Add to cache
+		for _, pkg := range packages {
+			// Create a unique key including the component is not strictly necessary for lookups
+			// but helps if we want to debug
+			key := fmt.Sprintf("%s_%s", pkg.Package, pkg.Architecture)
+			pm.cache.packages[key] = pkg
+		}
+		
+		totalPackages += len(packages)
 	}
-	defer reader.Close()
 
-	// Parse packages
-	packages, err := ParsePackages(reader)
-	if err != nil {
-		return fmt.Errorf("parsing packages: %w", err)
-	}
-
-	pm.logger.Printf("  Parsed %d packages", len(packages))
-
-	// Update cache
-	pm.cache.packages = make(map[string]*PackageInfo)
-	for _, pkg := range packages {
-		key := fmt.Sprintf("%s_%s", pkg.Package, pkg.Architecture)
-		pm.cache.packages[key] = pkg
-	}
+	pm.logger.Printf("  Total packages indexed: %d", totalPackages)
 	pm.cache.lastUpdate = time.Now()
 
 	return nil
@@ -242,15 +260,13 @@ func (pm *PackageManager) findPackage(name, version string, arch Architecture) (
 	}
 
 	if version != "" {
-		return nil, fmt.Errorf("package %s version %s not found for architecture %s", name, version, arch)
+		return nil, fmt.Errorf("package %s version %s not found", name, version)
 	}
-	return nil, fmt.Errorf("package %s not found for architecture %s", name, arch)
+	return nil, fmt.Errorf("package %s not found", name)
 }
 
 // downloadPackage downloads a .deb package
 func (pm *PackageManager) downloadPackage(ctx context.Context, url, destPath string) error {
-	pm.logger.Printf("Downloading from: %s", url)
-
 	// Ensure directory exists
 	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 		return fmt.Errorf("creating directory: %w", err)
@@ -264,19 +280,16 @@ func (pm *PackageManager) downloadPackage(ctx context.Context, url, destPath str
 	defer f.Close()
 
 	// Download
-	written, err := pm.client.Download(ctx, url, f)
+	_, err = pm.client.Download(ctx, url, f)
 	if err != nil {
 		return fmt.Errorf("downloading: %w", err)
 	}
 
-	pm.logger.Printf("  Downloaded %d bytes to %s", written, destPath)
 	return nil
 }
 
 // verifyFileHash verifies the SHA256 hash of a file
 func (pm *PackageManager) verifyFileHash(filePath, expectedHash string) error {
-	pm.logger.Printf("Computing SHA256 hash of: %s", filePath)
-
 	f, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("opening file: %w", err)
@@ -290,21 +303,15 @@ func (pm *PackageManager) verifyFileHash(filePath, expectedHash string) error {
 
 	actualHash := hex.EncodeToString(hasher.Sum(nil))
 
-	pm.logger.Printf("  Expected: %s", expectedHash)
-	pm.logger.Printf("  Actual:   %s", actualHash)
-
 	if !strings.EqualFold(actualHash, expectedHash) {
 		return fmt.Errorf("hash mismatch: expected %s, got %s", expectedHash, actualHash)
 	}
 
-	pm.logger.Printf("  ✓ Hashes match!")
 	return nil
 }
 
 // extractDebPackage extracts a .deb package using the ar and tar formats
 func (pm *PackageManager) extractDebPackage(debPath, installPath string) error {
-	pm.logger.Printf("Extracting .deb package: %s -> %s", debPath, installPath)
-
 	// Open the .deb file (which is an ar archive)
 	f, err := os.Open(debPath)
 	if err != nil {
@@ -325,11 +332,8 @@ func (pm *PackageManager) extractDebPackage(debPath, installPath string) error {
 			return fmt.Errorf("reading ar entry: %w", err)
 		}
 
-		pm.logger.Printf("  Found ar member: %s (%d bytes)", header.Name, header.Size)
-
 		// Look for data.tar.* (data.tar.xz, data.tar.gz, data.tar.zst, etc.)
 		if strings.HasPrefix(header.Name, "data.tar") {
-			pm.logger.Printf("  Extracting data archive: %s", header.Name)
 			return pm.extractDataTar(arReader, header.Name, installPath)
 		}
 	}
@@ -343,7 +347,6 @@ func (pm *PackageManager) extractDataTar(r io.Reader, name, installPath string) 
 
 	// Handle different compression formats
 	if strings.HasSuffix(name, ".gz") {
-		pm.logger.Printf("  Using gzip decompression")
 		gzReader, err := gzip.NewReader(r)
 		if err != nil {
 			return fmt.Errorf("creating gzip reader: %w", err)
@@ -351,14 +354,12 @@ func (pm *PackageManager) extractDataTar(r io.Reader, name, installPath string) 
 		defer gzReader.Close()
 		tarReader = tar.NewReader(gzReader)
 	} else if strings.HasSuffix(name, ".xz") {
-		pm.logger.Printf("  Using xz decompression")
 		xzReader, err := xz.NewReader(r)
 		if err != nil {
 			return fmt.Errorf("creating xz reader: %w", err)
 		}
 		tarReader = tar.NewReader(xzReader)
 	} else if strings.HasSuffix(name, ".zst") {
-		pm.logger.Printf("  Using zstd decompression")
 		zstdReader, err := zstd.NewReader(r)
 		if err != nil {
 			return fmt.Errorf("creating zstd reader: %w", err)
@@ -367,14 +368,8 @@ func (pm *PackageManager) extractDataTar(r io.Reader, name, installPath string) 
 		tarReader = tar.NewReader(zstdReader)
 	} else {
 		// Assume uncompressed tar
-		pm.logger.Printf("  Using uncompressed tar")
 		tarReader = tar.NewReader(r)
 	}
-
-	// Track statistics
-	fileCount := 0
-	dirCount := 0
-	symlinkCount := 0
 
 	// Extract each entry
 	for {
@@ -400,8 +395,6 @@ func (pm *PackageManager) extractDataTar(r io.Reader, name, installPath string) 
 			if err := os.MkdirAll(targetPath, 0755); err != nil {
 				return fmt.Errorf("creating directory %s: %w", targetPath, err)
 			}
-			dirCount++
-			pm.logger.Printf("    📁 %s/", cleanPath)
 
 		case tar.TypeSymlink:
 			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
@@ -412,8 +405,6 @@ func (pm *PackageManager) extractDataTar(r io.Reader, name, installPath string) 
 			if err := os.Symlink(header.Linkname, targetPath); err != nil {
 				return fmt.Errorf("creating symlink %s -> %s: %w", targetPath, header.Linkname, err)
 			}
-			symlinkCount++
-			pm.logger.Printf("    🔗 %s -> %s", cleanPath, header.Linkname)
 
 		case tar.TypeReg:
 			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
@@ -434,23 +425,8 @@ func (pm *PackageManager) extractDataTar(r io.Reader, name, installPath string) 
 			if written != header.Size {
 				return fmt.Errorf("file size mismatch for %s: expected %d, got %d", targetPath, header.Size, written)
 			}
-
-			fileCount++
-			execFlag := ""
-			if header.Mode&0111 != 0 {
-				execFlag = " (executable)"
-			}
-			pm.logger.Printf("    📄 %s (%d bytes)%s", cleanPath, header.Size, execFlag)
-
-		default:
-			pm.logger.Printf("    ⚠️  Skipping unsupported file type %v for %s", header.Typeflag, cleanPath)
 		}
 	}
-
-	pm.logger.Printf("  ✓ Extraction complete:")
-	pm.logger.Printf("    - %d files", fileCount)
-	pm.logger.Printf("    - %d directories", dirCount)
-	pm.logger.Printf("    - %d symlinks", symlinkCount)
 
 	return nil
 }
