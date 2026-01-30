@@ -68,7 +68,7 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 
 	pm.logger.Printf("Starting operation for package: %s", opts.Package)
 
-	// 1. Sync DB (once at start)
+	// 1. Sync DB
 	if err := pm.updateDB(ctx, opts.Architecture); err != nil {
 		return err
 	}
@@ -80,7 +80,6 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 	return pm.installRecursive(ctx, opts.Package, visited, opts)
 }
 
-// installRecursive handles dependencies and installation
 func (pm *PackageManager) installRecursive(ctx context.Context, pkgName string, visited map[string]bool, opts *DownloadOptions) error {
 	// 1. Resolve Package (handle providers like "sh" -> "bash")
 	pkg, err := pm.resolvePackage(pkgName)
@@ -101,7 +100,7 @@ func (pm *PackageManager) installRecursive(ctx context.Context, pkgName string, 
 		// Clean dependency string (e.g. "glibc>=2.35" -> "glibc")
 		depName := cleanDepName(depStr)
 		
-		// Skip self-references or cycles if possible
+		// Skip self-references
 		if depName == pkg.Name { continue }
 
 		pm.logger.Printf("  -> Dependency: %s", depName)
@@ -113,14 +112,23 @@ func (pm *PackageManager) installRecursive(ctx context.Context, pkgName string, 
 
 	// 3. Download
 	// URL format: https://mirror/repo/os/arch/filename
-	// Fallback filename if empty in DB (sometimes happens with cached DBs)
+	
+	// Fallback filename if empty in DB
 	filename := pkg.Filename
 	if filename == "" {
 		filename = fmt.Sprintf("%s-%s-%s.pkg.tar.zst", pkg.Name, pkg.Version, pkg.Architecture)
 	}
 
+	// FIX: Use the repository architecture (opts.Architecture) for the URL path,
+	// NOT the package architecture (pkg.Architecture).
+	// 'any' packages live inside the 'x86_64' directory on the mirror.
+	repoArch := opts.Architecture
+	if repoArch == "" {
+		repoArch = "x86_64"
+	}
+
 	downloadURL := fmt.Sprintf("%s/%s/os/%s/%s", 
-		pm.config.MirrorURL, pkg.Repository, pkg.Architecture, filename)
+		pm.config.MirrorURL, pkg.Repository, repoArch, filename)
 	
 	destPath := filepath.Join(pm.config.CachePath, "downloads", filename)
 
@@ -213,15 +221,13 @@ func (pm *PackageManager) resolvePackage(name string) (*PackageInfo, error) {
 
 	// 2. Check providers
 	if providers, ok := pm.cache.providers[cleanName]; ok && len(providers) > 0 {
-		// Simple heuristic: Pick first one
-		// In reality, we might prefer "core" repo over "extra"
+		// Heuristic: Prefer core over extra, but here we just take the first one
 		return providers[0], nil
 	}
 
 	return nil, fmt.Errorf("package %s not found", name)
 }
 
-// findPackage is a public helper for single lookups (used by GetInfo)
 func (pm *PackageManager) findPackage(name, version string) (*PackageInfo, error) {
 	return pm.resolvePackage(name)
 }
