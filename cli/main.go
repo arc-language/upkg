@@ -1,467 +1,571 @@
-// cmd/main.go
+// cmd/upkg/main.go
 package main
 
 import (
-	"context"
-	"flag"
-	"fmt"
-	"log"
-	"os"
-	"strings"
-	"time"
-
-	"github.com/arc-language/upkg"
+    "context"
+    "fmt"
+    "os"
+    "os/exec"
+    "strings"
+    
+    "github.com/arc-language/upkg"
+    "github.com/arc-language/upkg/pkg/backend"
+    "github.com/arc-language/upkg/pkg/env"
 )
 
-// Common flags structure to share between subcommands
-type commonFlags struct {
-	backendName string
-	debug       bool
-	installPath string
-}
+var envManager *env.EnvironmentManager
 
 func main() {
-	// Custom usage message
-	flag.Usage = func() {
-		printUsage()
-	}
-
-	if len(os.Args) < 2 {
-		printUsage()
-		os.Exit(1)
-	}
-
-	// Subcommand switching
-	switch os.Args[1] {
-	case "install", "i":
-		runInstall(os.Args[2:])
-	case "search", "s":
-		runSearch(os.Args[2:])
-	case "info":
-		runInfo(os.Args[2:])
-	case "help", "-h", "--help":
-		printUsage()
-	default:
-		fmt.Printf("Unknown command: %s\n", os.Args[1])
-		fmt.Println("Run 'upkg help' for usage.")
-		os.Exit(1)
-	}
+    envManager = env.NewEnvironmentManager("")
+    
+    if len(os.Args) < 2 {
+        printUsage()
+        os.Exit(1)
+    }
+    
+    command := os.Args[1]
+    args := os.Args[2:]
+    
+    switch command {
+    case "env":
+        handleEnvCommand(args)
+    case "install":
+        handleInstallCommand(args)
+    case "run":
+        handleRunCommand(args)
+    case "shell":
+        handleShellCommand(args)
+    case "info":
+        handleInfoCommand(args)
+    case "search":
+        handleSearchCommand(args)
+    case "list":
+        handleListCommand(args)
+    case "version", "--version", "-v":
+        fmt.Println("upkg version 0.1.0")
+    case "help", "--help", "-h":
+        printUsage()
+    default:
+        fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n", command)
+        printUsage()
+        os.Exit(1)
+    }
 }
 
 func printUsage() {
-	fmt.Println("upkg - Universal Package Manager")
-	fmt.Println()
-	fmt.Println("Usage: upkg <command> [arguments] [options]")
-	fmt.Println()
-	fmt.Println("Commands:")
-	fmt.Println("  install, i   Download and install a package")
-	fmt.Println("  search, s    Search for packages")
-	fmt.Println("  info         Show package details")
-	fmt.Println()
-	fmt.Println("Examples:")
-	fmt.Println("  upkg install curl")
-	fmt.Println("  upkg install git -b pacman")
-	fmt.Println("  upkg search python --backend nix")
-	fmt.Println()
+    fmt.Println(`upkg - Universal Package Manager
+
+Usage: upkg <command> [args]
+
+Environment Management (conda-style):
+  env create <name> [--backend apt|brew|nix|dnf|pacman]
+                                Create new isolated environment
+  env list                      List all environments
+  env activate <name>           Activate an environment
+  env deactivate                Deactivate current environment
+  env remove <name>             Remove an environment
+  env info [name]               Show environment details
+
+Package Management:
+  install <package>             Install package to active environment
+  search <query>                Search for packages
+  list                          List installed packages in active environment
+  info <package>                Show package information
+  run <command> [args...]       Run command in active environment
+
+Shell Integration:
+  shell                         Output shell integration code
+                                Usage: eval "$(upkg shell)"
+
+Options:
+  --help, -h                    Show this help message
+  --version, -v                 Show version
+
+Examples:
+  # Create and use an environment
+  upkg env create myproject --backend apt
+  upkg env activate myproject
+  eval "$(upkg shell)"
+  
+  # Install packages
+  upkg install gcc
+  upkg install wget
+  upkg install openssl
+  
+  # Run commands
+  upkg run gcc myfile.c -o myfile
+  gcc myfile.c -o myfile  # After eval "$(upkg shell)"
+  
+  # List environments
+  upkg env list
+  
+  # Search for packages
+  upkg search python
+`)
 }
 
-// runInstall handles the 'install' subcommand
-func runInstall(args []string) {
-	fs := flag.NewFlagSet("install", flag.ExitOnError)
-
-	var (
-		cf          commonFlags
-		pkgVersion  string
-		platform    string
-		noExtract   bool
-		keepArchive bool
-		noVerify    bool
-	)
-
-	// Register flags
-	registerCommonFlags(fs, &cf)
-	fs.StringVar(&pkgVersion, "version", "", "Package version")
-	fs.StringVar(&pkgVersion, "v", "", "Package version (short)")
-	fs.StringVar(&platform, "platform", "", "Target platform/architecture")
-	fs.StringVar(&platform, "p", "", "Target platform (short)")
-	fs.BoolVar(&noExtract, "no-extract", false, "Download only, don't extract")
-	fs.BoolVar(&keepArchive, "keep-archive", false, "Keep archive file after extraction")
-	fs.BoolVar(&noVerify, "no-verify", false, "Skip hash verification")
-
-	fs.Parse(args)
-
-	// Get positional argument (package name)
-	pkgName := fs.Arg(0)
-	if pkgName == "" {
-		fmt.Println("Error: Package name required")
-		fmt.Println("Usage: upkg install <package_name> [options]")
-		os.Exit(1)
-	}
-
-	// FIX: Capture both manager and config
-	mgr, config := setupManager(cf)
-	defer mgr.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-
-	// Prepare options
-	pkg := &upkg.Package{
-		Name:    pkgName,
-		Version: pkgVersion,
-	}
-
-	opts := &upkg.DownloadOptions{
-		Platform: platform,
-	}
-
-	if noExtract {
-		f := false
-		opts.Extract = &f
-	}
-	if keepArchive {
-		t := true
-		opts.KeepArchive = &t
-	}
-	if noVerify {
-		f := false
-		opts.VerifyHash = &f
-	}
-
-	// FIX: Use 'config.InstallPath' instead of 'mgr.Config.InstallPath'
-	printHeader("Downloading Package", pkgName, pkgVersion, mgr.Backend(), config.InstallPath)
-
-	err := mgr.Download(ctx, pkg, opts)
-	if err != nil {
-		fmt.Printf("\n❌ Error downloading package: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("\n✅ Successfully downloaded and installed %s\n", pkgName)
-	
-	// FIX: Use 'config.InstallPath' here as well
-	printPostInstallInstructions(mgr.Backend(), config.InstallPath, pkgName)
+func handleEnvCommand(args []string) {
+    if len(args) == 0 {
+        fmt.Fprintf(os.Stderr, "Error: env command requires a subcommand\n\n")
+        fmt.Println("Available subcommands:")
+        fmt.Println("  create <name>     Create new environment")
+        fmt.Println("  list              List all environments")
+        fmt.Println("  activate <name>   Activate environment")
+        fmt.Println("  deactivate        Deactivate environment")
+        fmt.Println("  remove <name>     Remove environment")
+        fmt.Println("  info [name]       Show environment details")
+        os.Exit(1)
+    }
+    
+    subcommand := args[0]
+    subArgs := args[1:]
+    
+    switch subcommand {
+    case "create":
+        handleEnvCreate(subArgs)
+    case "list":
+        handleEnvList(subArgs)
+    case "activate":
+        handleEnvActivate(subArgs)
+    case "deactivate":
+        handleEnvDeactivate(subArgs)
+    case "remove", "rm":
+        handleEnvRemove(subArgs)
+    case "info":
+        handleEnvInfo(subArgs)
+    default:
+        fmt.Fprintf(os.Stderr, "Unknown env subcommand: %s\n", subcommand)
+        os.Exit(1)
+    }
 }
 
-// runSearch handles the 'search' subcommand
-func runSearch(args []string) {
-	fs := flag.NewFlagSet("search", flag.ExitOnError)
-	var cf commonFlags
-	registerCommonFlags(fs, &cf)
-	fs.Parse(args)
-
-	query := fs.Arg(0)
-	if query == "" {
-		fmt.Println("Error: Search query required")
-		fmt.Println("Usage: upkg search <query> [options]")
-		os.Exit(1)
-	}
-
-	// We ignore config here as we don't need it for search
-	mgr, _ := setupManager(cf)
-	defer mgr.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	fmt.Printf("Searching for '%s' using %s...\n\n", query, mgr.Backend())
-	results, err := mgr.Search(ctx, query)
-	if err != nil {
-		fmt.Printf("Error searching packages: %v\n", err)
-		os.Exit(1)
-	}
-
-	if len(results) == 0 {
-		fmt.Println("No packages found")
-		os.Exit(0)
-	}
-
-	printSearchResults(results)
+func handleEnvCreate(args []string) {
+    if len(args) < 1 {
+        fmt.Fprintf(os.Stderr, "Usage: upkg env create <name> [--backend apt|brew|nix|dnf|pacman]\n")
+        os.Exit(1)
+    }
+    
+    name := args[0]
+    backend := "apt" // default
+    
+    // Parse --backend flag
+    for i := 1; i < len(args); i++ {
+        if args[i] == "--backend" && i+1 < len(args) {
+            backend = args[i+1]
+            i++
+        }
+    }
+    
+    // Validate backend
+    validBackends := map[string]bool{
+        "apt": true, "brew": true, "nix": true,
+        "dnf": true, "pacman": true, "apk": true,
+        "zypper": true, "choco": true,
+    }
+    
+    if !validBackends[backend] {
+        fmt.Fprintf(os.Stderr, "Error: invalid backend '%s'\n", backend)
+        fmt.Fprintf(os.Stderr, "Valid backends: apt, brew, nix, dnf, pacman, apk, zypper, choco\n")
+        os.Exit(1)
+    }
+    
+    envSpec, err := envManager.CreateEnv(name, backend)
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+        os.Exit(1)
+    }
+    
+    fmt.Printf("✓ Created environment: %s\n", envSpec.Name)
+    fmt.Printf("  Backend: %s\n", envSpec.Backend)
+    fmt.Printf("  Path: %s\n", envSpec.InstallPath)
+    fmt.Printf("\nNext steps:\n")
+    fmt.Printf("  upkg env activate %s\n", name)
+    fmt.Printf("  upkg install <package>\n")
 }
 
-// runInfo handles the 'info' subcommand
-func runInfo(args []string) {
-	fs := flag.NewFlagSet("info", flag.ExitOnError)
-	var cf commonFlags
-	registerCommonFlags(fs, &cf)
-	fs.Parse(args)
-
-	pkgName := fs.Arg(0)
-	if pkgName == "" {
-		fmt.Println("Error: Package name required")
-		fmt.Println("Usage: upkg info <package_name> [options]")
-		os.Exit(1)
-	}
-
-	mgr, _ := setupManager(cf)
-	defer mgr.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	pkgInfo, err := mgr.GetInfo(ctx, pkgName)
-	if err != nil {
-		fmt.Printf("Error getting package info: %v\n", err)
-		os.Exit(1)
-	}
-
-	printPackageInfo(pkgInfo)
+func handleEnvList(args []string) {
+    envs, err := envManager.ListEnvs()
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+        os.Exit(1)
+    }
+    
+    if len(envs) == 0 {
+        fmt.Println("No environments found.")
+        fmt.Println("\nCreate one with: upkg env create <name>")
+        return
+    }
+    
+    active, _ := envManager.GetActiveEnv()
+    
+    fmt.Println("Environments:")
+    for _, e := range envs {
+        marker := "  "
+        if active != nil && e.Name == active.Name {
+            marker = "* "
+        }
+        fmt.Printf("%s%s\n", marker, e.Name)
+        fmt.Printf("     Backend: %s | Packages: %d\n", e.Backend, len(e.Packages))
+    }
+    
+    if active != nil {
+        fmt.Printf("\n* = active environment\n")
+    }
 }
 
-// registerCommonFlags binds flags to variables, supporting both short (-b) and long (--backend)
-func registerCommonFlags(fs *flag.FlagSet, cf *commonFlags) {
-	// We use a custom function for backend to update the struct
-	fs.Func("backend", "Backend to use (auto, nix, brew, etc)", func(s string) error {
-		cf.backendName = s
-		return nil
-	})
-	fs.Func("b", "Backend (short)", func(s string) error {
-		cf.backendName = s
-		return nil
-	})
-
-	// Default backend if not set
-	cf.backendName = "auto"
-
-	fs.BoolVar(&cf.debug, "debug", false, "Enable debug logging")
-	fs.StringVar(&cf.installPath, "install-path", "", "Custom install path (default: ~/.upkg)")
+func handleEnvActivate(args []string) {
+    if len(args) < 1 {
+        fmt.Fprintf(os.Stderr, "Usage: upkg env activate <name>\n")
+        os.Exit(1)
+    }
+    
+    name := args[0]
+    if err := envManager.ActivateEnv(name); err != nil {
+        fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+        os.Exit(1)
+    }
+    
+    fmt.Printf("✓ Environment '%s' activated.\n\n", name)
+    fmt.Println("To use in your current shell, run:")
+    fmt.Println("  eval \"$(upkg shell)\"")
+    fmt.Println("\nOr add to your ~/.bashrc or ~/.zshrc:")
+    fmt.Println("  eval \"$(upkg shell)\"")
 }
 
-// setupManager initializes the upkg Manager based on flags
-// FIX: Return both *upkg.Manager AND *upkg.Config so caller can access paths
-func setupManager(cf commonFlags) (*upkg.Manager, *upkg.Config) {
-	// 1. Load default configuration (which sets ~/.upkg and ~/.cache/upkg)
-	config := upkg.DefaultConfig()
-
-	// 2. Apply flags
-	config.Debug = cf.debug
-	if cf.debug {
-		config.Logger = log.New(os.Stdout, "[upkg] ", log.LstdFlags)
-	}
-	if cf.installPath != "" {
-		config.InstallPath = cf.installPath
-	}
-
-	// 3. Ensure Directories Exist
-	// This handles the "~/.upkg/ if not exist auto creates" requirement
-	if err := os.MkdirAll(config.InstallPath, 0755); err != nil {
-		fmt.Printf("❌ Error creating install directory (%s): %v\n", config.InstallPath, err)
-		os.Exit(1)
-	}
-	// Also ensure cache exists
-	if err := os.MkdirAll(config.CachePath, 0755); err != nil {
-		if cf.debug {
-			fmt.Printf("Warning: Error creating cache directory (%s): %v\n", config.CachePath, err)
-		}
-	}
-
-	// 4. Select Backend
-	var backendType upkg.BackendType
-	switch cf.backendName {
-	case "auto":
-		backendType = upkg.BackendAuto
-	case "nix":
-		backendType = upkg.BackendNix
-	case "brew":
-		backendType = upkg.BackendBrew
-	case "dpkg":
-		backendType = upkg.BackendDpkg
-	case "apt":
-		backendType = upkg.BackendApt
-	case "apk":
-		backendType = upkg.BackendApk
-	case "dnf":
-		backendType = upkg.BackendDnf
-	case "choco":
-		backendType = upkg.BackendChoco
-	case "pacman":
-		backendType = upkg.BackendPacman
-	case "zypper":
-		backendType = upkg.BackendZypper
-	default:
-		fmt.Printf("Unknown backend: %s\n", cf.backendName)
-		os.Exit(1)
-	}
-
-	mgr, err := upkg.NewManager(backendType, config)
-	if err != nil {
-		fmt.Printf("Error initializing manager: %v\n", err)
-		os.Exit(1)
-	}
-
-	// FIX: Return the config we created so we can access InstallPath later
-	return mgr, config
+func handleEnvDeactivate(args []string) {
+    if err := envManager.DeactivateEnv(); err != nil {
+        fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+        os.Exit(1)
+    }
+    fmt.Println("✓ Environment deactivated")
+    fmt.Println("\nRun this to update your shell:")
+    fmt.Println("  eval \"$(upkg shell)\"")
 }
 
-// ---------------------------------------------------------
-// UI / Printing Helper Functions
-// ---------------------------------------------------------
-
-func printHeader(title, name, version, backend, path string) {
-	if path == "" {
-		path = "default"
-	}
-	fmt.Printf("\n")
-	fmt.Printf("╔═══════════════════════════════════════════════════════════════╗\n")
-	fmt.Printf("║ %-61s ║\n", center(title, 61))
-	fmt.Printf("╠═══════════════════════════════════════════════════════════════╣\n")
-	fmt.Printf("║ Package:  %-51s ║\n", truncate(name, 51))
-	if version != "" {
-		fmt.Printf("║ Version:  %-51s ║\n", truncate(version, 51))
-	}
-	fmt.Printf("║ Backend:  %-51s ║\n", truncate(backend, 51))
-	fmt.Printf("║ Install:  %-51s ║\n", truncate(path, 51))
-	fmt.Printf("╚═══════════════════════════════════════════════════════════════╝\n")
-	fmt.Println()
+func handleEnvRemove(args []string) {
+    if len(args) < 1 {
+        fmt.Fprintf(os.Stderr, "Usage: upkg env remove <name>\n")
+        os.Exit(1)
+    }
+    
+    name := args[0]
+    
+    // Check if it's the active environment
+    if active, err := envManager.GetActiveEnv(); err == nil && active.Name == name {
+        fmt.Fprintf(os.Stderr, "Error: cannot remove active environment '%s'\n", name)
+        fmt.Fprintf(os.Stderr, "Deactivate it first: upkg env deactivate\n")
+        os.Exit(1)
+    }
+    
+    // Confirm deletion
+    fmt.Printf("Remove environment '%s'? [y/N]: ", name)
+    var response string
+    fmt.Scanln(&response)
+    
+    if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
+        fmt.Println("Cancelled")
+        return
+    }
+    
+    if err := envManager.RemoveEnv(name); err != nil {
+        fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+        os.Exit(1)
+    }
+    
+    fmt.Printf("✓ Environment '%s' removed\n", name)
 }
 
-func printSearchResults(results []*upkg.PackageInfo) {
-	fmt.Printf("Found %d package(s):\n\n", len(results))
-	for i, pkg := range results {
-		if i >= 20 {
-			fmt.Printf("... and %d more results (showing first 20)\n", len(results)-20)
-			break
-		}
-		fmt.Printf("📦 %s (%s)\n", pkg.Name, pkg.Version)
-		if pkg.Description != "" {
-			desc := pkg.Description
-			if idx := findNewline(desc); idx > 0 {
-				desc = desc[:idx]
-			}
-			if len(desc) > 80 {
-				desc = desc[:77] + "..."
-			}
-			fmt.Printf("   %s\n", desc)
-		}
-		if len(pkg.Platforms) > 0 {
-			fmt.Printf("   Platforms: %v\n", pkg.Platforms)
-		}
-		fmt.Println()
-	}
+func handleEnvInfo(args []string) {
+    var envSpec *env.EnvSpec
+    var err error
+    
+    if len(args) > 0 {
+        // Show info for specific environment
+        envSpec, err = envManager.LoadEnv(args[0])
+    } else {
+        // Show info for active environment
+        envSpec, err = envManager.GetActiveEnv()
+    }
+    
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+        os.Exit(1)
+    }
+    
+    active, _ := envManager.GetActiveEnv()
+    isActive := active != nil && active.Name == envSpec.Name
+    
+    fmt.Printf("Environment: %s", envSpec.Name)
+    if isActive {
+        fmt.Printf(" (active)")
+    }
+    fmt.Println()
+    fmt.Printf("  Backend: %s\n", envSpec.Backend)
+    fmt.Printf("  Path: %s\n", envSpec.InstallPath)
+    fmt.Printf("  Created: %s\n", envSpec.CreatedAt)
+    fmt.Printf("  Packages: %d\n", len(envSpec.Packages))
+    
+    if len(envSpec.Packages) > 0 {
+        fmt.Println("\nInstalled packages:")
+        for name, version := range envSpec.Packages {
+            fmt.Printf("  - %s (%s)\n", name, version)
+        }
+    }
+    
+    // Show environment paths
+    environment := envSpec.GetEnvironment()
+    
+    if libs := environment.GetLibraryPaths(); len(libs) > 0 {
+        fmt.Println("\nLibrary paths:")
+        for _, p := range libs {
+            fmt.Printf("  - %s\n", p)
+        }
+    }
+    
+    if bins := environment.GetBinaryPaths(); len(bins) > 0 {
+        fmt.Println("\nBinary paths:")
+        for _, p := range bins {
+            fmt.Printf("  - %s\n", p)
+        }
+    }
 }
 
-func printPackageInfo(pkgInfo *upkg.PackageInfo) {
-	fmt.Printf("\n")
-	fmt.Printf("╔═══════════════════════════════════════════════════════════════╗\n")
-	fmt.Printf("║                    Package Information                        ║\n")
-	fmt.Printf("╠═══════════════════════════════════════════════════════════════╣\n")
-	fmt.Printf("║ Name:        %-48s ║\n", truncate(pkgInfo.Name, 48))
-	fmt.Printf("║ Version:     %-48s ║\n", truncate(pkgInfo.Version, 48))
-	fmt.Printf("║ Backend:     %-48s ║\n", truncate(pkgInfo.Backend, 48))
-	if pkgInfo.Description != "" {
-		descLines := wrapText(pkgInfo.Description, 48)
-		fmt.Printf("║ Description: %-48s ║\n", descLines[0])
-		for i := 1; i < len(descLines) && i < 3; i++ {
-			fmt.Printf("║              %-48s ║\n", descLines[i])
-		}
-		if len(descLines) > 3 {
-			fmt.Printf("║              %-48s ║\n", "...")
-		}
-	}
-	if pkgInfo.Homepage != "" {
-		fmt.Printf("║ Homepage:    %-48s ║\n", truncate(pkgInfo.Homepage, 48))
-	}
-	if pkgInfo.License != "" {
-		fmt.Printf("║ License:     %-48s ║\n", truncate(pkgInfo.License, 48))
-	}
-	if len(pkgInfo.Platforms) > 0 {
-		platformStr := strings.Join(pkgInfo.Platforms, ", ")
-		fmt.Printf("║ Platforms:   %-48s ║\n", truncate(platformStr, 48))
-	}
-	if len(pkgInfo.Outputs) > 0 {
-		var outputs []string
-		for k := range pkgInfo.Outputs {
-			outputs = append(outputs, k)
-		}
-		outputStr := strings.Join(outputs, ", ")
-		fmt.Printf("║ Outputs:     %-48s ║\n", truncate(outputStr, 48))
-	}
-	fmt.Printf("╚═══════════════════════════════════════════════════════════════╝\n")
+func handleInstallCommand(args []string) {
+    if len(args) == 0 {
+        fmt.Fprintf(os.Stderr, "Usage: upkg install <package> [package...]\n")
+        os.Exit(1)
+    }
+    
+    envSpec, err := envManager.GetActiveEnv()
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "Error: No active environment\n\n")
+        fmt.Fprintf(os.Stderr, "Create and activate an environment first:\n")
+        fmt.Fprintf(os.Stderr, "  upkg env create myenv\n")
+        fmt.Fprintf(os.Stderr, "  upkg env activate myenv\n")
+        os.Exit(1)
+    }
+    
+    // Create upkg manager with environment's install path
+    config := upkg.DefaultConfig()
+    config.InstallPath = envSpec.InstallPath
+    config.Debug = false // Set to true for verbose output
+    
+    backendType := mapBackendName(envSpec.Backend)
+    manager, err := upkg.NewManager(backendType, config)
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "Error creating manager: %v\n", err)
+        os.Exit(1)
+    }
+    defer manager.Close()
+    
+    // Install each package
+    for _, packageName := range args {
+        fmt.Printf("Installing %s...\n", packageName)
+        
+        pkg := &backend.Package{Name: packageName}
+        if err := manager.Download(context.Background(), pkg, nil); err != nil {
+            fmt.Fprintf(os.Stderr, "✗ Error installing %s: %v\n", packageName, err)
+            continue
+        }
+        
+        // Record installation
+        envSpec.AddPackage(packageName, "latest")
+        
+        fmt.Printf("✓ %s installed successfully\n", packageName)
+    }
+    
+    // Save updated environment
+    envManager.UpdateEnv(envSpec)
 }
 
-func printPostInstallInstructions(backendName, installPath, pkgName string) {
-	switch backendName {
-	case "brew", "dpkg", "apt", "dnf", "apk", "pacman", "zypper":
-		fmt.Printf("\n📍 Installation location: %s\n", installPath)
-		fmt.Printf("\n💡 You may need to add the following to your PATH:\n")
-		fmt.Printf("   export PATH=\"%s/bin:$PATH\"\n", installPath)
-		fmt.Printf("   export PATH=\"%s/usr/bin:$PATH\"\n", installPath)
-	case "choco":
-		fmt.Printf("\n📍 Installation location: %s\n", installPath)
-		fmt.Printf("\n💡 Windows binaries are usually in the tools directory or extracted root.\n")
-	case "nix":
-		fmt.Printf("\n📍 Nix package installed. Check your Nix profile for binaries.\n")
-	}
-
-	fmt.Printf("\n📦 Installed files can be found in:\n")
-	switch backendName {
-	case "dpkg", "apt", "dnf", "pacman", "zypper":
-		fmt.Printf("   %s/usr/bin/     - Executables\n", installPath)
-		fmt.Printf("   %s/usr/lib/     - Libraries\n", installPath)
-	case "apk":
-		fmt.Printf("   %s/bin/         - Executables\n", installPath)
-		fmt.Printf("   %s/lib/         - Libraries\n", installPath)
-	case "brew":
-		fmt.Printf("   %s/Cellar/      - Bottle files\n", installPath)
-	case "choco":
-		fmt.Printf("   %s/%s/          - Package content\n", installPath, pkgName)
-	}
+func handleRunCommand(args []string) {
+    if len(args) == 0 {
+        fmt.Fprintf(os.Stderr, "Usage: upkg run <command> [args...]\n")
+        os.Exit(1)
+    }
+    
+    envSpec, err := envManager.GetActiveEnv()
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "Error: No active environment\n")
+        os.Exit(1)
+    }
+    
+    environment := envSpec.GetEnvironment()
+    
+    // Execute command with environment
+    cmd := exec.Command(args[0], args[1:]...)
+    cmd.Env = environment.BuildEnv()
+    cmd.Stdout = os.Stdout
+    cmd.Stderr = os.Stderr
+    cmd.Stdin = os.Stdin
+    
+    if err := cmd.Run(); err != nil {
+        if exitErr, ok := err.(*exec.ExitError); ok {
+            os.Exit(exitErr.ExitCode())
+        }
+        os.Exit(1)
+    }
 }
 
-// Utility functions
-
-func findNewline(s string) int {
-	for i, c := range s {
-		if c == '\n' || c == '\r' {
-			return i
-		}
-	}
-	return -1
+func handleShellCommand(args []string) {
+    envSpec, err := envManager.GetActiveEnv()
+    if err != nil {
+        // No active environment - output nothing (clean for eval)
+        return
+    }
+    
+    environment := envSpec.GetEnvironment()
+    
+    // Generate shell code for eval (NOT a .sh file, just stdout)
+    shellCode := environment.GenerateActivateScript()
+    fmt.Print(shellCode)
 }
 
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	if maxLen <= 3 {
-		return s[:maxLen]
-	}
-	return s[:maxLen-3] + "..."
+func handleInfoCommand(args []string) {
+    if len(args) == 0 {
+        fmt.Fprintf(os.Stderr, "Usage: upkg info <package>\n")
+        os.Exit(1)
+    }
+    
+    envSpec, err := envManager.GetActiveEnv()
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "Error: No active environment\n")
+        os.Exit(1)
+    }
+    
+    packageName := args[0]
+    
+    // Create manager
+    config := upkg.DefaultConfig()
+    config.InstallPath = envSpec.InstallPath
+    
+    backendType := mapBackendName(envSpec.Backend)
+    manager, err := upkg.NewManager(backendType, config)
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+        os.Exit(1)
+    }
+    defer manager.Close()
+    
+    // Get package info
+    info, err := manager.GetInfo(context.Background(), packageName)
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+        os.Exit(1)
+    }
+    
+    fmt.Printf("Package: %s\n", info.Name)
+    fmt.Printf("Version: %s\n", info.Version)
+    if info.Description != "" {
+        fmt.Printf("Description: %s\n", info.Description)
+    }
+    if info.Homepage != "" {
+        fmt.Printf("Homepage: %s\n", info.Homepage)
+    }
+    if info.License != "" {
+        fmt.Printf("License: %s\n", info.License)
+    }
+    if len(info.Platforms) > 0 {
+        fmt.Printf("Platforms: %s\n", strings.Join(info.Platforms, ", "))
+    }
 }
 
-func center(s string, width int) string {
-	if len(s) >= width {
-		return s
-	}
-	padding := (width - len(s)) / 2
-	return strings.Repeat(" ", padding) + s
+func handleSearchCommand(args []string) {
+    if len(args) == 0 {
+        fmt.Fprintf(os.Stderr, "Usage: upkg search <query>\n")
+        os.Exit(1)
+    }
+    
+    envSpec, err := envManager.GetActiveEnv()
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "Error: No active environment\n")
+        os.Exit(1)
+    }
+    
+    query := strings.Join(args, " ")
+    
+    // Create manager
+    config := upkg.DefaultConfig()
+    config.InstallPath = envSpec.InstallPath
+    
+    backendType := mapBackendName(envSpec.Backend)
+    manager, err := upkg.NewManager(backendType, config)
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+        os.Exit(1)
+    }
+    defer manager.Close()
+    
+    // Search packages
+    fmt.Printf("Searching for '%s'...\n\n", query)
+    results, err := manager.Search(context.Background(), query)
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+        os.Exit(1)
+    }
+    
+    if len(results) == 0 {
+        fmt.Println("No packages found")
+        return
+    }
+    
+    fmt.Printf("Found %d packages:\n\n", len(results))
+    for i, pkg := range results {
+        if i >= 20 {
+            fmt.Printf("... and %d more\n", len(results)-20)
+            break
+        }
+        
+        fmt.Printf("%s (%s)\n", pkg.Name, pkg.Version)
+        if pkg.Description != "" {
+            desc := pkg.Description
+            if len(desc) > 80 {
+                desc = desc[:77] + "..."
+            }
+            fmt.Printf("  %s\n", desc)
+        }
+        fmt.Println()
+    }
 }
 
-func wrapText(text string, width int) []string {
-	var lines []string
-	var currentLine string
+func handleListCommand(args []string) {
+    envSpec, err := envManager.GetActiveEnv()
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "Error: No active environment\n")
+        os.Exit(1)
+    }
+    
+    if len(envSpec.Packages) == 0 {
+        fmt.Println("No packages installed in this environment")
+        return
+    }
+    
+    fmt.Printf("Packages in environment '%s':\n\n", envSpec.Name)
+    for name, version := range envSpec.Packages {
+        fmt.Printf("  %s (%s)\n", name, version)
+    }
+    fmt.Printf("\nTotal: %d packages\n", len(envSpec.Packages))
+}
 
-	words := strings.Fields(text)
-	for _, word := range words {
-		if len(currentLine)+len(word)+1 <= width {
-			if currentLine != "" {
-				currentLine += " "
-			}
-			currentLine += word
-		} else {
-			if currentLine != "" {
-				lines = append(lines, currentLine)
-			}
-			currentLine = word
-		}
-	}
-	if currentLine != "" {
-		lines = append(lines, currentLine)
-	}
-	for i := range lines {
-		if len(lines[i]) < width {
-			lines[i] += strings.Repeat(" ", width-len(lines[i]))
-		}
-	}
-	return lines
+func mapBackendName(name string) backend.BackendType {
+    switch strings.ToLower(name) {
+    case "apt":
+        return backend.BackendApt
+    case "brew":
+        return backend.BackendBrew
+    case "nix":
+        return backend.BackendNix
+    case "dnf":
+        return backend.BackendDnf
+    case "pacman":
+        return backend.BackendPacman
+    case "apk":
+        return backend.BackendApk
+    case "zypper":
+        return backend.BackendZypper
+    case "choco":
+        return backend.BackendChoco
+    default:
+        return backend.BackendAuto
+    }
 }
