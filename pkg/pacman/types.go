@@ -1,3 +1,4 @@
+// pkg/pacman/types.go
 package pacman
 
 import (
@@ -65,7 +66,8 @@ type DownloadOptions struct {
 
 // PackageCache caches package index information
 type PackageCache struct {
-	packages      map[string]*PackageInfo // key: package_name
+	packages      map[string]*PackageInfo   // key: package_name
+	providers     map[string][]*PackageInfo // key: virtual_name -> list of providers
 	lastUpdate    time.Time
 	cacheDuration time.Duration
 }

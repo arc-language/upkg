@@ -5,7 +5,7 @@ go 1.25.6
 require (
 	github.com/DataDog/zstd v1.5.5 // indirect
 	github.com/ProtonMail/go-crypto v1.0.0 // indirect
-	github.com/arc-language/upkg v0.0.0-20260130041601-f3b9dce741b5 // indirect
+	github.com/arc-language/upkg v0.0.0-20260130043348-ecaed08f7bcc // indirect
 	github.com/blakesmith/ar v0.0.0-20190502131153-809d4375e1fb // indirect
 	github.com/cavaliergopher/cpio v1.0.1 // indirect
 	github.com/cloudflare/circl v1.3.8 // indirect
