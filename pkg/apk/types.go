@@ -44,6 +44,9 @@ type PackageInfo struct {
 	Provides      []string // Provides (p:)
 	InstallIf     []string // Install if (i:)
 	Checksum      string   // SHA256 checksum (C:)
+	
+	// Internal fields
+	Repository    string   // "main", "community", etc.
 }
 
 // DownloadOptions configures package download and extraction
@@ -58,7 +61,13 @@ type DownloadOptions struct {
 
 // PackageCache caches package index information
 type PackageCache struct {
-	packages      map[string]*PackageInfo // key: package_architecture_repo
+	// packages maps "pkgName" -> PackageInfo
+	// We only keep the latest version for simplicity in this implementation
+	packages map[string]*PackageInfo 
+	
+	// providers maps "virtualName" (e.g., "cmd:sh") -> list of packages that provide it
+	providers map[string][]*PackageInfo
+
 	lastUpdate    time.Time
 	cacheDuration time.Duration
 }
