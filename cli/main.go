@@ -1,5 +1,4 @@
 // cmd/upkg/main.go
-// export PATH="$PWD:$PATH"
 package main
 
 import (
@@ -15,7 +14,7 @@ import (
 )
 
 var envManager *env.EnvironmentManager
-
+var debugMode bool
 
 func main() {
     envManager = env.NewEnvironmentManager("")
@@ -75,7 +74,7 @@ Environment Management:
   env info [name]               Show environment details
 
 Package Management:
-  install <package>             Install package to active environment
+  install <package> [--debug]   Install package to active environment
   search <query>                Search for packages
   list                          List installed packages in active environment
   info <package>                Show package information
@@ -84,6 +83,7 @@ Package Management:
 Options:
   --help, -h                    Show this help message
   --version, -v                 Show version
+  --debug                       Enable debug output (for install command)
 
 Setup Instructions:
   1. Add to your ~/.bashrc or ~/.zshrc:
@@ -107,8 +107,9 @@ Examples:
   upkg env create myproject --backend apt
   upkg env activate myproject    # Shell automatically modified!
   
-  # Install packages
-  upkg install gcc wget
+  # Install packages with debug output
+  upkg install gcc --debug
+  upkg install wget
   
   # Now commands just work
   gcc --version
@@ -249,6 +250,23 @@ upkg() {
             return 1
         fi
         
+        # SAVE ORIGINAL PATH on first activation
+        if [[ -z "$UPKG_ORIGINAL_PATH" ]]; then
+            export UPKG_ORIGINAL_PATH="$PATH"
+        fi
+        
+        # AGGRESSIVELY CLEAR old upkg environment
+        if [[ -n "$UPKG_ENV" ]]; then
+            export PATH="$UPKG_ORIGINAL_PATH"
+        fi
+        
+        # Clear all upkg-related variables
+        unset LD_LIBRARY_PATH
+        unset LIBRARY_PATH
+        unset C_INCLUDE_PATH
+        unset CPLUS_INCLUDE_PATH
+        unset PKG_CONFIG_PATH
+        
         # Call upkg to activate and get shell code
         command upkg env activate "$3" > /dev/null 2>&1
         
@@ -266,7 +284,19 @@ upkg() {
     elif [[ "$1" == "env" ]] && [[ "$2" == "deactivate" ]]; then
         # Deactivation
         command upkg env deactivate
+        
+        # Restore original PATH
+        if [[ -n "$UPKG_ORIGINAL_PATH" ]]; then
+            export PATH="$UPKG_ORIGINAL_PATH"
+        fi
+        
+        # Clear all upkg variables
         unset UPKG_ENV
+        unset LD_LIBRARY_PATH
+        unset LIBRARY_PATH
+        unset C_INCLUDE_PATH
+        unset CPLUS_INCLUDE_PATH
+        unset PKG_CONFIG_PATH
         
     else
         # For all other commands, just call the binary
@@ -295,6 +325,23 @@ function upkg
             return 1
         end
         
+        # SAVE ORIGINAL PATH on first activation
+        if not set -q UPKG_ORIGINAL_PATH
+            set -gx UPKG_ORIGINAL_PATH $PATH
+        end
+        
+        # AGGRESSIVELY CLEAR old upkg environment
+        if set -q UPKG_ENV
+            set -gx PATH $UPKG_ORIGINAL_PATH
+        end
+        
+        # Clear all upkg-related variables
+        set -e LD_LIBRARY_PATH
+        set -e LIBRARY_PATH
+        set -e C_INCLUDE_PATH
+        set -e CPLUS_INCLUDE_PATH
+        set -e PKG_CONFIG_PATH
+        
         # Call upkg to activate
         command upkg env activate $argv[3] > /dev/null 2>&1
         
@@ -311,7 +358,19 @@ function upkg
         
     else if test "$argv[1]" = "env" -a "$argv[2]" = "deactivate"
         command upkg env deactivate
+        
+        # Restore original PATH
+        if set -q UPKG_ORIGINAL_PATH
+            set -gx PATH $UPKG_ORIGINAL_PATH
+        end
+        
+        # Clear all upkg variables
         set -e UPKG_ENV
+        set -e LD_LIBRARY_PATH
+        set -e LIBRARY_PATH
+        set -e C_INCLUDE_PATH
+        set -e CPLUS_INCLUDE_PATH
+        set -e PKG_CONFIG_PATH
         
     else
         command upkg $argv
@@ -426,7 +485,7 @@ func handleEnvList(args []string) {
     for _, e := range envs {
         marker := "  "
         if active != nil && e.Name == active.Name {
-            marker = "* "
+            marker := "* "
         }
         fmt.Printf("%s%s\n", marker, e.Name)
         fmt.Printf("     Backend: %s | Packages: %d\n", e.Backend, len(e.Packages))
@@ -444,6 +503,15 @@ func handleEnvActivate(args []string) {
     }
     
     name := args[0]
+    
+    // AUTO-DEACTIVATE any existing environment first
+    if active, err := envManager.GetActiveEnv(); err == nil && active.Name != name {
+        if debugMode {
+            fmt.Printf("Debug: Deactivating current environment '%s'...\n", active.Name)
+        }
+        envManager.DeactivateEnv()
+    }
+    
     if err := envManager.ActivateEnv(name); err != nil {
         fmt.Fprintf(os.Stderr, "Error: %v\n", err)
         os.Exit(1)
@@ -550,7 +618,24 @@ func handleEnvInfo(args []string) {
 
 func handleInstallCommand(args []string) {
     if len(args) == 0 {
-        fmt.Fprintf(os.Stderr, "Usage: upkg install <package> [package...]\n")
+        fmt.Fprintf(os.Stderr, "Usage: upkg install <package> [package...] [--debug]\n")
+        os.Exit(1)
+    }
+    
+    // Parse args - separate packages from flags
+    var packages []string
+    debug := false
+    
+    for _, arg := range args {
+        if arg == "--debug" || arg == "-d" {
+            debug = true
+        } else {
+            packages = append(packages, arg)
+        }
+    }
+    
+    if len(packages) == 0 {
+        fmt.Fprintf(os.Stderr, "Error: No packages specified\n")
         os.Exit(1)
     }
     
@@ -566,7 +651,15 @@ func handleInstallCommand(args []string) {
     // Create upkg manager with environment's install path
     config := upkg.DefaultConfig()
     config.InstallPath = envSpec.InstallPath
-    config.Debug = false // Set to true for verbose output
+    config.Debug = debug // Enable debug mode
+    
+    if debug {
+        fmt.Println("=== DEBUG MODE ENABLED ===")
+        fmt.Printf("Install path: %s\n", config.InstallPath)
+        fmt.Printf("Cache path: %s\n", config.CachePath)
+        fmt.Printf("Backend: %s\n", envSpec.Backend)
+        fmt.Println("==========================")
+    }
     
     backendType := mapBackendName(envSpec.Backend)
     manager, err := upkg.NewManager(backendType, config)
@@ -577,7 +670,7 @@ func handleInstallCommand(args []string) {
     defer manager.Close()
     
     // Install each package
-    for _, packageName := range args {
+    for _, packageName := range packages {
         fmt.Printf("Installing %s...\n", packageName)
         
         pkg := &backend.Package{Name: packageName}
@@ -594,6 +687,35 @@ func handleInstallCommand(args []string) {
     
     // Save updated environment
     envManager.UpdateEnv(envSpec)
+    
+    if debug {
+        fmt.Println("\n=== POST-INSTALL DEBUG INFO ===")
+        fmt.Printf("Installed to: %s\n", envSpec.InstallPath)
+        fmt.Println("Directory contents:")
+        listDirectory(envSpec.InstallPath, "  ")
+        fmt.Println("================================")
+    }
+}
+
+func listDirectory(path string, indent string) {
+    entries, err := os.ReadDir(path)
+    if err != nil {
+        fmt.Printf("%sError reading %s: %v\n", indent, path, err)
+        return
+    }
+    
+    for _, entry := range entries {
+        if entry.IsDir() {
+            fmt.Printf("%s%s/\n", indent, entry.Name())
+            // Only recurse one level to avoid too much output
+            if indent == "  " {
+                listDirectory(path+"/"+entry.Name(), indent+"  ")
+            }
+        } else {
+            info, _ := entry.Info()
+            fmt.Printf("%s%s (%d bytes)\n", indent, entry.Name(), info.Size())
+        }
+    }
 }
 
 func handleRunCommand(args []string) {
