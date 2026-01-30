@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cavaliergopher/cpio"
 	"github.com/sassoftware/go-rpmutils"
 )
 
@@ -103,13 +104,12 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 
 // installRecursive resolves dependencies and installs the package
 func (pm *PackageManager) installRecursive(ctx context.Context, pkgRequest string, arch Architecture, visited map[string]bool, opts *DownloadOptions) error {
-	// 1. Resolve Package (handle name or virtual provide like /bin/sh)
-	pkgInfo, err := pm.resolvePackage(pkgRequest)
+	// 1. Resolve Package
+	pkgInfo, err := pm.resolvePackage(pkgRequest, arch)
 	if err != nil {
 		return fmt.Errorf("resolving %s: %w", pkgRequest, err)
 	}
 
-	// Avoid cycles using the unique package name
 	if visited[pkgInfo.Name] {
 		return nil
 	}
@@ -119,22 +119,16 @@ func (pm *PackageManager) installRecursive(ctx context.Context, pkgRequest strin
 
 	// 2. Install Dependencies
 	for _, req := range pkgInfo.Requires {
-		// Filter out internal RPM provides that aren't packages
-		if strings.HasPrefix(req, "rpmlib(") { continue }
-		if strings.HasPrefix(req, "config(") { continue }
-		
-		// Clean the requirement string (remove version logic for now)
-		// e.g., "glibc >= 2.34" -> "glibc"
 		reqName := cleanReqName(req)
 		
-		// Skip self-reference
+		// Skip self-reference or known circulars
 		if reqName == pkgInfo.Name { continue }
+		if reqName == "bash" && pkgInfo.Name == "bash" { continue }
 
 		pm.logger.Printf("  -> Dependency: %s", reqName)
 		
 		if err := pm.installRecursive(ctx, reqName, arch, visited, opts); err != nil {
-			// DNF metadata is very detailed. Missing one specific capability (like a specific .so version)
-			// shouldn't halt the whole install in this lightweight manager.
+			// Warn but proceed
 			pm.logger.Printf("  ⚠️  Warning: failed to install dependency %s: %v", reqName, err)
 		}
 	}
@@ -158,9 +152,13 @@ func (pm *PackageManager) installRecursive(ctx context.Context, pkgRequest strin
 			baseURL, pm.config.Release, arch, pkgInfo.Location)
 	}
 
-	pm.logger.Printf("Downloading %s...", pkgInfo.Name)
-	if err := pm.downloadPackage(ctx, downloadURL, rpmPath); err != nil {
-		return fmt.Errorf("downloading package: %w", err)
+	if _, err := os.Stat(rpmPath); os.IsNotExist(err) {
+		pm.logger.Printf("Downloading %s...", pkgInfo.Name)
+		if err := pm.downloadPackage(ctx, downloadURL, rpmPath); err != nil {
+			return fmt.Errorf("downloading package: %w", err)
+		}
+	} else {
+		pm.logger.Printf("  Using cached: %s", rpmPath)
 	}
 
 	// 4. Verify hash
@@ -186,17 +184,25 @@ func (pm *PackageManager) installRecursive(ctx context.Context, pkgRequest strin
 	return nil
 }
 
-// resolvePackage finds a package by name OR by what it provides
-func (pm *PackageManager) resolvePackage(name string) (*PackageInfo, error) {
-	// 1. Try direct name match
-	if pkg, ok := pm.cache.packages[name]; ok {
-		return pkg, nil
-	}
+// resolvePackage finds a package by name OR by what it provides, preferring the target Arch
+func (pm *PackageManager) resolvePackage(name string, arch Architecture) (*PackageInfo, error) {
+	clean := cleanReqName(name)
 
-	// 2. Try virtual providers (e.g. "libssl.so.3" or "/bin/sh")
-	if providers, ok := pm.cache.providers[name]; ok && len(providers) > 0 {
-		// Heuristic: Prefer package with shortest name (e.g. "bash" over "bash-doc")
-		// or just take the first one.
+	// 1. Try providers map
+	if providers, ok := pm.cache.providers[clean]; ok && len(providers) > 0 {
+		// Prefer exact architecture match
+		for _, p := range providers {
+			if p.Architecture == string(arch) {
+				return p, nil
+			}
+		}
+		// Then noarch
+		for _, p := range providers {
+			if p.Architecture == "noarch" {
+				return p, nil
+			}
+		}
+		// Fallback to first available (better than failing)
 		return providers[0], nil
 	}
 
@@ -204,8 +210,6 @@ func (pm *PackageManager) resolvePackage(name string) (*PackageInfo, error) {
 }
 
 func cleanReqName(req string) string {
-	// Basic cleaning: remove version comparisons
-	// "bash >= 5.0" -> "bash"
 	if idx := strings.IndexAny(req, "<>="); idx != -1 {
 		return strings.TrimSpace(req[:idx])
 	}
@@ -214,7 +218,6 @@ func cleanReqName(req string) string {
 
 // updatePackageIndex updates the local package index cache
 func (pm *PackageManager) updatePackageIndex(ctx context.Context, arch Architecture) error {
-	// Check if cache is still valid
 	if time.Since(pm.cache.lastUpdate) < pm.cache.cacheDuration && len(pm.cache.packages) > 0 {
 		return nil
 	}
@@ -223,7 +226,7 @@ func (pm *PackageManager) updatePackageIndex(ctx context.Context, arch Architect
 	pm.cache.packages = make(map[string]*PackageInfo)
 	pm.cache.providers = make(map[string][]*PackageInfo)
 
-	// Construct base URL and repomd.xml URL
+	// Construct URL
 	baseURL := pm.config.RepositoryURL
 	var repomdURL string
 
@@ -240,20 +243,17 @@ func (pm *PackageManager) updatePackageIndex(ctx context.Context, arch Architect
 
 	pm.logger.Printf("  Fetching repomd.xml: %s", repomdURL)
 
-	// Download repomd.xml
 	resp, err := pm.client.Get(ctx, repomdURL)
 	if err != nil {
 		return fmt.Errorf("fetching repomd.xml: %w", err)
 	}
 
-	// Parse repomd.xml
 	repoMD, err := ParseRepoMD(resp.Body)
 	resp.Body.Close()
 	if err != nil {
 		return fmt.Errorf("parsing repomd.xml: %w", err)
 	}
 
-	// Find primary.xml location
 	var primaryLocation string
 	for _, data := range repoMD.Data {
 		if data.Type == "primary" {
@@ -266,7 +266,6 @@ func (pm *PackageManager) updatePackageIndex(ctx context.Context, arch Architect
 		return fmt.Errorf("primary.xml location not found in repomd.xml")
 	}
 
-	// Construct full URL for primary.xml
 	var primaryURL string
 	if pm.config.Repository == "updates" {
 		primaryURL = fmt.Sprintf("%s/updates/%s/Everything/%s/%s",
@@ -281,7 +280,6 @@ func (pm *PackageManager) updatePackageIndex(ctx context.Context, arch Architect
 
 	pm.logger.Printf("  Downloading primary metadata...")
 
-	// Download and decompress primary.xml
 	var primaryReader io.ReadCloser
 	if strings.HasSuffix(primaryLocation, ".gz") {
 		primaryReader, err = pm.client.GetGzipped(ctx, primaryURL)
@@ -301,19 +299,17 @@ func (pm *PackageManager) updatePackageIndex(ctx context.Context, arch Architect
 	}
 	defer primaryReader.Close()
 
-	// Parse primary.xml
 	packages, err := ParsePrimary(primaryReader)
 	if err != nil {
 		return fmt.Errorf("parsing primary.xml: %w", err)
 	}
 
-	// Index packages and providers
 	for _, pkg := range packages {
-		// 1. Map Name -> Package
+		if pkg.Architecture != string(arch) && pkg.Architecture != "noarch" {
+			continue
+		}
+
 		pm.cache.packages[pkg.Name] = pkg
-		
-		// 2. Map Provides -> Package
-		// Also treat the package name itself as a provider
 		pm.cache.providers[pkg.Name] = append(pm.cache.providers[pkg.Name], pkg)
 		
 		for _, provide := range pkg.Provides {
@@ -329,27 +325,24 @@ func (pm *PackageManager) updatePackageIndex(ctx context.Context, arch Architect
 
 // findPackage is exposed for the generic Manager interface
 func (pm *PackageManager) findPackage(name, version string, arch Architecture) (*PackageInfo, error) {
-	return pm.resolvePackage(name)
+	return pm.resolvePackage(name, arch)
 }
 
 // downloadPackage downloads an .rpm package
 func (pm *PackageManager) downloadPackage(ctx context.Context, url, destPath string) error {
-	// Ensure directory exists
 	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 		return fmt.Errorf("creating directory: %w", err)
 	}
 
-	// Create output file
 	f, err := os.Create(destPath)
 	if err != nil {
 		return fmt.Errorf("creating file: %w", err)
 	}
 	defer f.Close()
 
-	// Download
 	_, err = pm.client.Download(ctx, url, f)
 	if err != nil {
-		os.Remove(destPath) // clean up partial
+		os.Remove(destPath)
 		return fmt.Errorf("downloading: %w", err)
 	}
 
@@ -364,7 +357,6 @@ func (pm *PackageManager) verifyFileHash(filePath, expectedHash, hashType string
 	}
 	defer f.Close()
 
-	// For now, we only support SHA256 as it's standard in Fedora
 	if hashType != "sha256" {
 		return nil
 	}
@@ -383,29 +375,113 @@ func (pm *PackageManager) verifyFileHash(filePath, expectedHash, hashType string
 	return nil
 }
 
-// extractRPMPackage extracts an .rpm package
+// extractRPMPackage extracts an .rpm package with PERMISSION OVERRIDES
+// This ensures that we don't lock ourselves out of directories (e.g. /usr/bin mode 0555)
 func (pm *PackageManager) extractRPMPackage(rpmPath, installPath string) error {
-	// Ensure install directory exists
 	if err := os.MkdirAll(installPath, 0755); err != nil {
 		return fmt.Errorf("creating install directory: %w", err)
 	}
 
-	// Open the RPM file
 	f, err := os.Open(rpmPath)
 	if err != nil {
 		return fmt.Errorf("opening rpm file: %w", err)
 	}
 	defer f.Close()
 
-	// Read the RPM package
-	rpm, err := rpmutils.ReadRpm(f)
+	// 1. Read RPM Header to find Payload compression
+	pkg, err := rpmutils.ReadRpm(f)
 	if err != nil {
 		return fmt.Errorf("reading rpm package: %w", err)
 	}
 
-	// Extract the payload to the install path
-	if err := rpm.ExpandPayload(installPath); err != nil {
-		return fmt.Errorf("expanding rpm payload: %w", err)
+	// 2. Get the CPIO stream (handles gzip/xz/zstd automatically)
+	payloadReader, err := pkg.PayloadReader()
+	if err != nil {
+		return fmt.Errorf("getting payload reader: %w", err)
+	}
+
+	// 3. Iterate CPIO archive manually
+	cpioReader := cpio.NewReader(payloadReader)
+
+	for {
+		header, err := cpioReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("reading cpio entry: %w", err)
+		}
+
+		// Sanitize path to prevent ZipSlip (absolute or parent traversal)
+		relPath := strings.TrimPrefix(header.Name, "./")
+		relPath = strings.TrimPrefix(relPath, "/")
+		if strings.Contains(relPath, "..") {
+			continue // Skip unsafe paths
+		}
+
+		targetPath := filepath.Join(installPath, relPath)
+
+		// 4. FORCE WRITE PERMISSIONS
+		// We OR the mode with 0200 (user writeable) and ensure 0700 for directories
+		// This fixes the "permission denied" errors when packages set 0555 on /usr/bin
+		mode := header.Mode
+		if header.Mode.IsDir() {
+			mode |= 0755 // Ensure rwx for owner
+		} else {
+			mode |= 0644 // Ensure rw for owner
+		}
+
+		switch {
+		case header.Mode.IsDir():
+			// If directory exists, we might need to chmod it if it was read-only
+			if info, err := os.Stat(targetPath); err == nil {
+				if info.Mode().Perm()&0200 == 0 {
+					os.Chmod(targetPath, info.Mode()|0700)
+				}
+			}
+			if err := os.MkdirAll(targetPath, mode); err != nil {
+				return fmt.Errorf("creating dir %s: %w", targetPath, err)
+			}
+
+		case header.Mode.IsRegular():
+			// Ensure parent exists
+			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+				return fmt.Errorf("creating parent dir: %w", err)
+			}
+
+			// If file exists and is read-only, force remove or chmod
+			if info, err := os.Stat(targetPath); err == nil {
+				if info.Mode().Perm()&0200 == 0 {
+					os.Chmod(targetPath, info.Mode()|0600)
+				}
+				os.Remove(targetPath)
+			}
+
+			outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+			if err != nil {
+				// Retry loop for weird race conditions or parent perm issues
+				return fmt.Errorf("creating file %s: %w", targetPath, err)
+			}
+			
+			if _, err := io.Copy(outFile, cpioReader); err != nil {
+				outFile.Close()
+				return fmt.Errorf("writing file %s: %w", targetPath, err)
+			}
+			outFile.Close()
+
+		case header.Mode&os.ModeSymlink != 0: // cpio symlink handling
+			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+				return fmt.Errorf("creating parent dir for symlink: %w", err)
+			}
+			// Remove existing
+			os.Remove(targetPath)
+			
+			// header.Linkname contains the target
+			if err := os.Symlink(header.Linkname, targetPath); err != nil {
+				// Ignore symlink errors (sometimes point to invalid places in partial installs)
+				pm.logger.Printf("Warning: failed to create symlink %s -> %s: %v", targetPath, header.Linkname, err)
+			}
+		}
 	}
 
 	return nil
@@ -446,8 +522,7 @@ func (pm *PackageManager) SearchPackages(ctx context.Context, query string, arch
 	query = strings.ToLower(query)
 
 	for _, pkg := range pm.cache.packages {
-		if strings.Contains(strings.ToLower(pkg.Name), query) ||
-			strings.Contains(strings.ToLower(pkg.Summary), query) {
+		if strings.Contains(strings.ToLower(pkg.Name), query) {
 			results = append(results, pkg)
 		}
 	}
