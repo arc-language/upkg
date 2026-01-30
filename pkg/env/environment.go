@@ -21,15 +21,62 @@ func (e *Environment) GetLibraryPaths() []string {
     layout := GetPackageLayout(e.BackendType)
     
     paths := make([]string, 0, len(layout.Libraries))
+    seen := make(map[string]bool)
+
+    addPath := func(p string) {
+        if !seen[p] {
+            paths = append(paths, p)
+            seen[p] = true
+        }
+    }
+
     for _, relPath := range layout.Libraries {
         absPath := filepath.Join(e.InstallPath, relPath)
         // Only include if directory exists
         if dirExists(absPath) {
-            paths = append(paths, absPath)
+            addPath(absPath)
+
+            // RECURSIVE FIX:
+            // Scan for subdirectories that contain shared libraries.
+            // This fixes packages like libblas3, liblapack3, etc. that hide 
+            // binaries in subfolders like /usr/lib/x86_64-linux-gnu/blas/
+            entries, err := os.ReadDir(absPath)
+            if err == nil {
+                for _, entry := range entries {
+                    if entry.IsDir() {
+                        subPath := filepath.Join(absPath, entry.Name())
+                        if containsSharedLibs(subPath) {
+                            addPath(subPath)
+                        }
+                    }
+                }
+            }
         }
     }
     
     return paths
+}
+
+// containsSharedLibs checks if a directory contains shared library files
+func containsSharedLibs(path string) bool {
+    entries, err := os.ReadDir(path)
+    if err != nil {
+        return false
+    }
+
+    for _, entry := range entries {
+        if entry.IsDir() {
+            continue
+        }
+        name := entry.Name()
+        // Check for .so (Linux), .dylib (macOS), or .dll (Windows)
+        if strings.Contains(name, ".so") || 
+           strings.Contains(name, ".dylib") || 
+           strings.Contains(name, ".dll") {
+            return true
+        }
+    }
+    return false
 }
 
 // GetIncludePaths returns absolute paths to include directories
