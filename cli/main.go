@@ -485,7 +485,7 @@ func handleEnvList(args []string) {
     for _, e := range envs {
         marker := "  "
         if active != nil && e.Name == active.Name {
-            marker := "* "
+            //marker += "* "
         }
         fmt.Printf("%s%s\n", marker, e.Name)
         fmt.Printf("     Backend: %s | Packages: %d\n", e.Backend, len(e.Packages))
