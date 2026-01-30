@@ -59,17 +59,14 @@ func NewPackageManager(cfg *Config) *PackageManager {
 		logger: logger,
 		cache: &PackageCache{
 			packages:      make(map[string]*PackageInfo),
+			providers:     make(map[string][]*PackageInfo),
 			cacheDuration: 30 * time.Minute,
 		},
 	}
 
 	if cfg.Debug {
 		pm.logger.Printf("Initialized Fedora DNF PackageManager")
-		pm.logger.Printf("  Repository: %s", cfg.RepositoryURL)
 		pm.logger.Printf("  Release: %s", cfg.Release)
-		pm.logger.Printf("  Repository: %s", cfg.Repository)
-		pm.logger.Printf("  InstallPath: %s", cfg.InstallPath)
-		pm.logger.Printf("  CachePath: %s", cfg.CachePath)
 	}
 
 	return pm
@@ -81,7 +78,7 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 		return fmt.Errorf("Package is required in DownloadOptions")
 	}
 
-	pm.logger.Printf("Starting download for package: %s", opts.Package)
+	pm.logger.Printf("Starting operation for package: %s", opts.Package)
 
 	// Set defaults
 	if opts.Architecture == "" {
@@ -90,40 +87,59 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 			return fmt.Errorf("detecting architecture: %w", err)
 		}
 		opts.Architecture = detected
-		pm.logger.Printf("Auto-detected architecture: %s", opts.Architecture)
-	} else {
-		if !opts.Architecture.IsValid() {
-			return fmt.Errorf("invalid architecture: %s", opts.Architecture)
-		}
 	}
 
-	pm.logger.Printf("Download options:")
-	pm.logger.Printf("  Package: %s", opts.Package)
-	pm.logger.Printf("  Version: %s", opts.Version)
-	pm.logger.Printf("  Architecture: %s", opts.Architecture)
-	pm.logger.Printf("  Extract: %v", opts.Extract)
-	pm.logger.Printf("  KeepArchive: %v", opts.KeepArchive)
-	pm.logger.Printf("  VerifyHash: %v", opts.VerifyHash)
-
-	// 1. Update package index if needed
-	pm.logger.Printf("Step 1: Updating package index...")
+	// 1. Update package index (Global sync)
 	if err := pm.updatePackageIndex(ctx, opts.Architecture); err != nil {
 		return fmt.Errorf("updating package index: %w", err)
 	}
-	pm.logger.Printf("  ✓ Package index updated")
 
-	// 2. Find package info
-	pm.logger.Printf("Step 2: Finding package info...")
-	pkgInfo, err := pm.findPackage(opts.Package, opts.Version, opts.Architecture)
+	// Track visited to avoid cycles
+	visited := make(map[string]bool)
+
+	// Start recursion
+	return pm.installRecursive(ctx, opts.Package, opts.Architecture, visited, opts)
+}
+
+// installRecursive resolves dependencies and installs the package
+func (pm *PackageManager) installRecursive(ctx context.Context, pkgRequest string, arch Architecture, visited map[string]bool, opts *DownloadOptions) error {
+	// 1. Resolve Package (handle name or virtual provide like /bin/sh)
+	pkgInfo, err := pm.resolvePackage(pkgRequest)
 	if err != nil {
-		return fmt.Errorf("finding package: %w", err)
+		return fmt.Errorf("resolving %s: %w", pkgRequest, err)
 	}
-	pm.logger.Printf("  ✓ Package found: %s %s", pkgInfo.Name, pkgInfo.FullVersion())
-	pm.logger.Printf("    Summary: %s", pkgInfo.Summary)
-	pm.logger.Printf("    Size: %d bytes", pkgInfo.Size)
 
-	// 3. Download package
-	pm.logger.Printf("Step 3: Downloading package...")
+	// Avoid cycles using the unique package name
+	if visited[pkgInfo.Name] {
+		return nil
+	}
+	visited[pkgInfo.Name] = true
+
+	pm.logger.Printf("Processing package: %s (resolved from %s)", pkgInfo.Name, pkgRequest)
+
+	// 2. Install Dependencies
+	for _, req := range pkgInfo.Requires {
+		// Filter out internal RPM provides that aren't packages
+		if strings.HasPrefix(req, "rpmlib(") { continue }
+		if strings.HasPrefix(req, "config(") { continue }
+		
+		// Clean the requirement string (remove version logic for now)
+		// e.g., "glibc >= 2.34" -> "glibc"
+		reqName := cleanReqName(req)
+		
+		// Skip self-reference
+		if reqName == pkgInfo.Name { continue }
+
+		pm.logger.Printf("  -> Dependency: %s", reqName)
+		
+		if err := pm.installRecursive(ctx, reqName, arch, visited, opts); err != nil {
+			// DNF metadata is very detailed. Missing one specific capability (like a specific .so version)
+			// shouldn't halt the whole install in this lightweight manager.
+			pm.logger.Printf("  ⚠️  Warning: failed to install dependency %s: %v", reqName, err)
+		}
+	}
+
+	// 3. Download
 	rpmPath := filepath.Join(pm.config.CachePath, "downloads",
 		fmt.Sprintf("%s-%s.%s.rpm", pkgInfo.Name, pkgInfo.FullVersion(), pkgInfo.Architecture))
 
@@ -133,85 +149,91 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 
 	if pm.config.Repository == "updates" {
 		downloadURL = fmt.Sprintf("%s/updates/%s/Everything/%s/%s",
-			baseURL, pm.config.Release, opts.Architecture, pkgInfo.Location)
+			baseURL, pm.config.Release, arch, pkgInfo.Location)
 	} else if pm.config.Release == "rawhide" {
 		downloadURL = fmt.Sprintf("%s/development/rawhide/Everything/%s/os/%s",
-			baseURL, opts.Architecture, pkgInfo.Location)
+			baseURL, arch, pkgInfo.Location)
 	} else {
 		downloadURL = fmt.Sprintf("%s/releases/%s/Everything/%s/os/%s",
-			baseURL, pm.config.Release, opts.Architecture, pkgInfo.Location)
+			baseURL, pm.config.Release, arch, pkgInfo.Location)
 	}
 
+	pm.logger.Printf("Downloading %s...", pkgInfo.Name)
 	if err := pm.downloadPackage(ctx, downloadURL, rpmPath); err != nil {
 		return fmt.Errorf("downloading package: %w", err)
 	}
-	pm.logger.Printf("  ✓ Download complete")
 
 	// 4. Verify hash
 	if opts.VerifyHash && pkgInfo.Checksum != "" {
-		pm.logger.Printf("Step 4: Verifying checksum...")
 		if err := pm.verifyFileHash(rpmPath, pkgInfo.Checksum, pkgInfo.ChecksumType); err != nil {
 			return fmt.Errorf("checksum verification failed: %w", err)
 		}
-		pm.logger.Printf("  ✓ Checksum verified")
-	} else {
-		pm.logger.Printf("Step 4: Skipping checksum verification")
 	}
 
 	// 5. Extract package
 	if opts.Extract {
-		pm.logger.Printf("Step 5: Extracting package...")
+		pm.logger.Printf("Extracting %s...", pkgInfo.Name)
 		if err := pm.extractRPMPackage(rpmPath, pm.config.InstallPath); err != nil {
 			return fmt.Errorf("extracting package: %w", err)
 		}
-		pm.logger.Printf("  ✓ Extraction complete")
-
-		// 6. Cleanup archive if requested
+		
 		if !opts.KeepArchive {
-			pm.logger.Printf("Step 6: Removing archive file...")
-			if err := os.Remove(rpmPath); err != nil {
-				pm.logger.Printf("  ⚠️  Warning: failed to remove archive: %v", err)
-			} else {
-				pm.logger.Printf("  ✓ Archive removed")
-			}
-		} else {
-			pm.logger.Printf("Step 6: Keeping archive file as requested")
+			os.Remove(rpmPath)
 		}
-	} else {
-		pm.logger.Printf("Step 5: Skipping extraction (Extract=false)")
 	}
 
-	pm.logger.Printf("✓ Package %s installed successfully", opts.Package)
+	pm.logger.Printf("✓ Installed %s", pkgInfo.Name)
 	return nil
+}
+
+// resolvePackage finds a package by name OR by what it provides
+func (pm *PackageManager) resolvePackage(name string) (*PackageInfo, error) {
+	// 1. Try direct name match
+	if pkg, ok := pm.cache.packages[name]; ok {
+		return pkg, nil
+	}
+
+	// 2. Try virtual providers (e.g. "libssl.so.3" or "/bin/sh")
+	if providers, ok := pm.cache.providers[name]; ok && len(providers) > 0 {
+		// Heuristic: Prefer package with shortest name (e.g. "bash" over "bash-doc")
+		// or just take the first one.
+		return providers[0], nil
+	}
+
+	return nil, fmt.Errorf("package or provider '%s' not found", name)
+}
+
+func cleanReqName(req string) string {
+	// Basic cleaning: remove version comparisons
+	// "bash >= 5.0" -> "bash"
+	if idx := strings.IndexAny(req, "<>="); idx != -1 {
+		return strings.TrimSpace(req[:idx])
+	}
+	return req
 }
 
 // updatePackageIndex updates the local package index cache
 func (pm *PackageManager) updatePackageIndex(ctx context.Context, arch Architecture) error {
 	// Check if cache is still valid
 	if time.Since(pm.cache.lastUpdate) < pm.cache.cacheDuration && len(pm.cache.packages) > 0 {
-		pm.logger.Printf("Using cached package index (age: %v)", time.Since(pm.cache.lastUpdate))
 		return nil
 	}
 
 	pm.logger.Printf("Fetching package index from repository...")
-
-	// Clear cache before updating
 	pm.cache.packages = make(map[string]*PackageInfo)
+	pm.cache.providers = make(map[string][]*PackageInfo)
 
 	// Construct base URL and repomd.xml URL
 	baseURL := pm.config.RepositoryURL
 	var repomdURL string
 
 	if pm.config.Repository == "updates" {
-		// Updates repository structure
 		repomdURL = fmt.Sprintf("%s/updates/%s/Everything/%s/repodata/repomd.xml",
 			baseURL, pm.config.Release, arch)
 	} else if pm.config.Release == "rawhide" {
-		// Rawhide (development) structure
 		repomdURL = fmt.Sprintf("%s/development/rawhide/Everything/%s/os/repodata/repomd.xml",
 			baseURL, arch)
 	} else {
-		// Regular releases structure
 		repomdURL = fmt.Sprintf("%s/releases/%s/Everything/%s/os/repodata/repomd.xml",
 			baseURL, pm.config.Release, arch)
 	}
@@ -244,8 +266,6 @@ func (pm *PackageManager) updatePackageIndex(ctx context.Context, arch Architect
 		return fmt.Errorf("primary.xml location not found in repomd.xml")
 	}
 
-	pm.logger.Printf("  Found primary.xml: %s", primaryLocation)
-
 	// Construct full URL for primary.xml
 	var primaryURL string
 	if pm.config.Repository == "updates" {
@@ -259,9 +279,9 @@ func (pm *PackageManager) updatePackageIndex(ctx context.Context, arch Architect
 			baseURL, pm.config.Release, arch, primaryLocation)
 	}
 
-	pm.logger.Printf("  Downloading primary.xml from: %s", primaryURL)
+	pm.logger.Printf("  Downloading primary metadata...")
 
-	// Download and decompress primary.xml (usually .gz, .xz, or .zst)
+	// Download and decompress primary.xml
 	var primaryReader io.ReadCloser
 	if strings.HasSuffix(primaryLocation, ".gz") {
 		primaryReader, err = pm.client.GetGzipped(ctx, primaryURL)
@@ -287,47 +307,33 @@ func (pm *PackageManager) updatePackageIndex(ctx context.Context, arch Architect
 		return fmt.Errorf("parsing primary.xml: %w", err)
 	}
 
-	pm.logger.Printf("  ✓ Parsed %d packages", len(packages))
-
-	// Add to cache
+	// Index packages and providers
 	for _, pkg := range packages {
-		key := fmt.Sprintf("%s_%s", pkg.Name, pkg.Architecture)
-		pm.cache.packages[key] = pkg
+		// 1. Map Name -> Package
+		pm.cache.packages[pkg.Name] = pkg
+		
+		// 2. Map Provides -> Package
+		// Also treat the package name itself as a provider
+		pm.cache.providers[pkg.Name] = append(pm.cache.providers[pkg.Name], pkg)
+		
+		for _, provide := range pkg.Provides {
+			pm.cache.providers[provide] = append(pm.cache.providers[provide], pkg)
+		}
 	}
 
+	pm.logger.Printf("  ✓ Parsed %d packages, %d unique providers", len(packages), len(pm.cache.providers))
 	pm.cache.lastUpdate = time.Now()
 
 	return nil
 }
 
-// findPackage finds a package in the cache
+// findPackage is exposed for the generic Manager interface
 func (pm *PackageManager) findPackage(name, version string, arch Architecture) (*PackageInfo, error) {
-	// Try exact architecture first
-	key := fmt.Sprintf("%s_%s", name, arch)
-	if pkg, ok := pm.cache.packages[key]; ok {
-		if version == "" || pkg.FullVersion() == version {
-			return pkg, nil
-		}
-	}
-
-	// Try "noarch" architecture
-	key = fmt.Sprintf("%s_%s", name, ArchNoarch)
-	if pkg, ok := pm.cache.packages[key]; ok {
-		if version == "" || pkg.FullVersion() == version {
-			return pkg, nil
-		}
-	}
-
-	if version != "" {
-		return nil, fmt.Errorf("package %s version %s not found for architecture %s", name, version, arch)
-	}
-	return nil, fmt.Errorf("package %s not found for architecture %s", name, arch)
+	return pm.resolvePackage(name)
 }
 
 // downloadPackage downloads an .rpm package
 func (pm *PackageManager) downloadPackage(ctx context.Context, url, destPath string) error {
-	pm.logger.Printf("Downloading from: %s", url)
-
 	// Ensure directory exists
 	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 		return fmt.Errorf("creating directory: %w", err)
@@ -341,28 +347,25 @@ func (pm *PackageManager) downloadPackage(ctx context.Context, url, destPath str
 	defer f.Close()
 
 	// Download
-	written, err := pm.client.Download(ctx, url, f)
+	_, err = pm.client.Download(ctx, url, f)
 	if err != nil {
+		os.Remove(destPath) // clean up partial
 		return fmt.Errorf("downloading: %w", err)
 	}
 
-	pm.logger.Printf("  Downloaded %d bytes to %s", written, destPath)
 	return nil
 }
 
 // verifyFileHash verifies the checksum of a file
 func (pm *PackageManager) verifyFileHash(filePath, expectedHash, hashType string) error {
-	pm.logger.Printf("Computing %s checksum of: %s", hashType, filePath)
-
 	f, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("opening file: %w", err)
 	}
 	defer f.Close()
 
-	// For now, we only support SHA256
+	// For now, we only support SHA256 as it's standard in Fedora
 	if hashType != "sha256" {
-		pm.logger.Printf("  Skipping verification: unsupported hash type %s", hashType)
 		return nil
 	}
 
@@ -373,21 +376,15 @@ func (pm *PackageManager) verifyFileHash(filePath, expectedHash, hashType string
 
 	actualHash := hex.EncodeToString(hasher.Sum(nil))
 
-	pm.logger.Printf("  Expected: %s", expectedHash)
-	pm.logger.Printf("  Actual:   %s", actualHash)
-
 	if !strings.EqualFold(actualHash, expectedHash) {
 		return fmt.Errorf("hash mismatch: expected %s, got %s", expectedHash, actualHash)
 	}
 
-	pm.logger.Printf("  ✓ Hashes match!")
 	return nil
 }
 
-// extractRPMPackage extracts an .rpm package using native Go implementation
+// extractRPMPackage extracts an .rpm package
 func (pm *PackageManager) extractRPMPackage(rpmPath, installPath string) error {
-	pm.logger.Printf("Extracting .rpm package: %s -> %s", rpmPath, installPath)
-
 	// Ensure install directory exists
 	if err := os.MkdirAll(installPath, 0755); err != nil {
 		return fmt.Errorf("creating install directory: %w", err)
@@ -406,14 +403,11 @@ func (pm *PackageManager) extractRPMPackage(rpmPath, installPath string) error {
 		return fmt.Errorf("reading rpm package: %w", err)
 	}
 
-	pm.logger.Printf("  Using native Go RPM extraction")
-
 	// Extract the payload to the install path
 	if err := rpm.ExpandPayload(installPath); err != nil {
 		return fmt.Errorf("expanding rpm payload: %w", err)
 	}
 
-	pm.logger.Printf("  ✓ Extraction complete")
 	return nil
 }
 
@@ -453,8 +447,7 @@ func (pm *PackageManager) SearchPackages(ctx context.Context, query string, arch
 
 	for _, pkg := range pm.cache.packages {
 		if strings.Contains(strings.ToLower(pkg.Name), query) ||
-			strings.Contains(strings.ToLower(pkg.Summary), query) ||
-			strings.Contains(strings.ToLower(pkg.Description), query) {
+			strings.Contains(strings.ToLower(pkg.Summary), query) {
 			results = append(results, pkg)
 		}
 	}

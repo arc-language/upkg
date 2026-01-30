@@ -9,7 +9,7 @@ import (
 // Config configures the Fedora/DNF package manager
 type Config struct {
 	RepositoryURL string        // Default: https://dl.fedoraproject.org/pub/fedora/linux
-	Release       string        // Fedora release (40, 39, 38, etc.)
+	Release       string        // Fedora release (42, 41, etc.)
 	Repository    string        // Repository name (releases, updates, etc.)
 	InstallPath   string        // Where to install packages
 	CachePath     string        // Where to cache downloaded files
@@ -62,7 +62,8 @@ type DownloadOptions struct {
 
 // PackageCache caches package index information
 type PackageCache struct {
-	packages      map[string]*PackageInfo // key: package_architecture
+	packages      map[string]*PackageInfo   // key: package_name
+	providers     map[string][]*PackageInfo // key: virtual_provide -> list of packages
 	lastUpdate    time.Time
 	cacheDuration time.Duration
 }
@@ -75,11 +76,11 @@ type RepoMD struct {
 
 // RepoData represents a data entry in repomd.xml
 type RepoData struct {
-	Type     string
-	Location string
-	Checksum string
+	Type         string
+	Location     string
+	Checksum     string
 	OpenChecksum string
-	Timestamp int64
-	Size     int64
-	OpenSize int64
+	Timestamp    int64
+	Size         int64
+	OpenSize     int64
 }
