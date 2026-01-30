@@ -75,13 +75,13 @@ func NewPackageManager(cfg *Config) *PackageManager {
 	return pm
 }
 
-// Download downloads and installs an Alpine package
+// Download downloads and installs an Alpine package and its dependencies
 func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) error {
 	if opts == nil || opts.Package == "" {
 		return fmt.Errorf("Package is required in DownloadOptions")
 	}
 
-	pm.logger.Printf("Starting download for package: %s", opts.Package)
+	pm.logger.Printf("Starting installation for package: %s", opts.Package)
 
 	// Set defaults
 	if opts.Architecture == "" {
@@ -97,85 +97,125 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 		}
 	}
 
-	pm.logger.Printf("Download options:")
-	pm.logger.Printf("  Package: %s", opts.Package)
-	pm.logger.Printf("  Version: %s", opts.Version)
-	pm.logger.Printf("  Architecture: %s", opts.Architecture)
-	pm.logger.Printf("  Extract: %v", opts.Extract)
-	pm.logger.Printf("  KeepArchive: %v", opts.KeepArchive)
-	pm.logger.Printf("  VerifyHash: %v", opts.VerifyHash)
-
-	// 1. Update package index if needed
-	pm.logger.Printf("Step 1: Updating package index...")
+	// 1. Update package index once at the top level
+	pm.logger.Printf("Updating package index...")
 	if err := pm.updatePackageIndex(ctx, opts.Architecture); err != nil {
 		return fmt.Errorf("updating package index: %w", err)
 	}
-	pm.logger.Printf("  ✓ Package index updated")
+	pm.logger.Printf("✓ Package index updated")
 
-	// 2. Find package info
-	pm.logger.Printf("Step 2: Finding package info...")
+	// Track installed packages to avoid loops
+	visited := make(map[string]bool)
+
+	// Start recursive installation
+	return pm.installRecursive(ctx, opts, visited)
+}
+
+// installRecursive handles the actual download, dependency resolution, and extraction
+func (pm *PackageManager) installRecursive(ctx context.Context, opts *DownloadOptions, visited map[string]bool) error {
+	// Skip if already visited
+	if visited[opts.Package] {
+		return nil
+	}
+	visited[opts.Package] = true
+
+	pm.logger.Printf("Processing package: %s", opts.Package)
+
+	// 1. Find package info
 	pkgInfo, err := pm.findPackage(opts.Package, opts.Version, opts.Architecture)
 	if err != nil {
-		return fmt.Errorf("finding package: %w", err)
+		// Alpine dependencies often use virtual names like "so:libc.so.6" or "cmd:sh"
+		// Since we don't have a "provides" DB yet, we skip these cleanly to avoid crashing.
+		if strings.HasPrefix(opts.Package, "so:") || strings.HasPrefix(opts.Package, "cmd:") {
+			pm.logger.Printf("  ℹ️  Skipping virtual dependency: %s", opts.Package)
+			return nil
+		}
+		return fmt.Errorf("finding package %s: %w", opts.Package, err)
 	}
-	pm.logger.Printf("  ✓ Package found: %s %s", pkgInfo.Package, pkgInfo.Version)
-	pm.logger.Printf("    Description: %s", pkgInfo.Description)
-	pm.logger.Printf("    Size: %d bytes", pkgInfo.PackageSize)
+
+	// 2. Resolve and install dependencies FIRST
+	if len(pkgInfo.Depends) > 0 {
+		pm.logger.Printf("Resolving dependencies for %s...", opts.Package)
+		for _, depName := range pkgInfo.Depends {
+			// Skip self-references
+			if depName == opts.Package {
+				continue
+			}
+			
+			pm.logger.Printf("  -> Dependency: %s", depName)
+			
+			depOpts := *opts // Shallow copy
+			depOpts.Package = depName
+			depOpts.Version = "" // Always use latest for deps to avoid version conflict hell
+			
+			if err := pm.installRecursive(ctx, &depOpts, visited); err != nil {
+				// Warn but proceed. This handles cases where a dependency is 
+				// a virtual package (e.g. "so:libssl.so.3") that we can't resolve yet.
+				pm.logger.Printf("  ⚠️  Warning: failed to install dependency %s: %v", depName, err)
+			}
+		}
+	}
 
 	// 3. Download package
-	pm.logger.Printf("Step 3: Downloading package...")
+	pm.logger.Printf("Downloading %s...", pkgInfo.Package)
 	apkPath := filepath.Join(pm.config.CachePath, "downloads",
 		fmt.Sprintf("%s-%s.apk", pkgInfo.Package, pkgInfo.Version))
 
 	// Construct download URL: {repo}/{branch}/{repository}/{arch}/{package}-{version}.apk
-	downloadURL := fmt.Sprintf("%s/%s/%s/%s/%s-%s.apk",
-		pm.config.RepositoryURL,
-		pm.config.Branch,
-		pm.config.Repository,
-		opts.Architecture,
-		pkgInfo.Package,
-		pkgInfo.Version)
+	// Note: We need to know which repository (main/community) the package came from.
+	// The findPackage method doesn't return the repo, but we can try both or cache it.
+	// For simplicity in this structure, we assume main, then fallback if download fails?
+	// Actually, let's try to determine it or try both URLs.
+	
+	// Try constructing URL. Since we don't store which repo the package came from in PackageInfo,
+	// we have to try both standard locations.
+	
+	repos := []string{pm.config.Repository, "main", "community"}
+	var downloadErr error
+	downloaded := false
 
-	if err := pm.downloadPackage(ctx, downloadURL, apkPath); err != nil {
-		return fmt.Errorf("downloading package: %w", err)
+	for _, repo := range repos {
+		url := fmt.Sprintf("%s/%s/%s/%s/%s-%s.apk",
+			pm.config.RepositoryURL,
+			pm.config.Branch,
+			repo,
+			opts.Architecture,
+			pkgInfo.Package,
+			pkgInfo.Version)
+		
+		if err := pm.downloadPackage(ctx, url, apkPath); err == nil {
+			downloaded = true
+			break
+		} else {
+			downloadErr = err
+		}
 	}
-	pm.logger.Printf("  ✓ Download complete")
+
+	if !downloaded {
+		return fmt.Errorf("downloading package %s failed: %w", pkgInfo.Package, downloadErr)
+	}
 
 	// 4. Verify hash
 	if opts.VerifyHash && pkgInfo.Checksum != "" {
-		pm.logger.Printf("Step 4: Verifying SHA1 hash...")
 		if err := pm.verifyFileHash(apkPath, pkgInfo.Checksum); err != nil {
-			return fmt.Errorf("hash verification failed: %w", err)
+			return fmt.Errorf("hash verification failed for %s: %w", pkgInfo.Package, err)
 		}
-		pm.logger.Printf("  ✓ Hash verified")
-	} else {
-		pm.logger.Printf("Step 4: Skipping hash verification")
 	}
 
 	// 5. Extract package
 	if opts.Extract {
-		pm.logger.Printf("Step 5: Extracting package...")
+		pm.logger.Printf("Extracting %s...", pkgInfo.Package)
 		if err := pm.extractAPKPackage(apkPath, pm.config.InstallPath); err != nil {
-			return fmt.Errorf("extracting package: %w", err)
+			return fmt.Errorf("extracting package %s: %w", pkgInfo.Package, err)
 		}
-		pm.logger.Printf("  ✓ Extraction complete")
 
 		// 6. Cleanup archive if requested
 		if !opts.KeepArchive {
-			pm.logger.Printf("Step 6: Removing archive file...")
-			if err := os.Remove(apkPath); err != nil {
-				pm.logger.Printf("  ⚠️  Warning: failed to remove archive: %v", err)
-			} else {
-				pm.logger.Printf("  ✓ Archive removed")
-			}
-		} else {
-			pm.logger.Printf("Step 6: Keeping archive file as requested")
+			os.Remove(apkPath)
 		}
-	} else {
-		pm.logger.Printf("Step 5: Skipping extraction (Extract=false)")
 	}
 
-	pm.logger.Printf("✓ Package %s installed successfully", opts.Package)
+	pm.logger.Printf("✓ Installed %s", pkgInfo.Package)
 	return nil
 }
 
@@ -259,7 +299,6 @@ func (pm *PackageManager) findPackage(name, version string, arch Architecture) (
 		key := fmt.Sprintf("%s_%s_%s", name, arch, repo)
 		if pkg, ok := pm.cache.packages[key]; ok {
 			if version == "" || pkg.Version == version {
-				pm.logger.Printf("  Found in repository: %s", repo)
 				return pkg, nil
 			}
 		}
@@ -268,22 +307,19 @@ func (pm *PackageManager) findPackage(name, version string, arch Architecture) (
 		key = fmt.Sprintf("%s_%s_%s", name, ArchNoarch, repo)
 		if pkg, ok := pm.cache.packages[key]; ok {
 			if version == "" || pkg.Version == version {
-				pm.logger.Printf("  Found in repository: %s", repo)
 				return pkg, nil
 			}
 		}
 	}
 
 	if version != "" {
-		return nil, fmt.Errorf("package %s version %s not found for architecture %s", name, version, arch)
+		return nil, fmt.Errorf("package %s version %s not found", name, version)
 	}
-	return nil, fmt.Errorf("package %s not found for architecture %s (searched repositories: main, community)", name, arch)
+	return nil, fmt.Errorf("package %s not found", name)
 }
 
 // downloadPackage downloads an .apk package
 func (pm *PackageManager) downloadPackage(ctx context.Context, url, destPath string) error {
-	pm.logger.Printf("Downloading from: %s", url)
-
 	// Ensure directory exists
 	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 		return fmt.Errorf("creating directory: %w", err)
@@ -297,19 +333,16 @@ func (pm *PackageManager) downloadPackage(ctx context.Context, url, destPath str
 	defer f.Close()
 
 	// Download
-	written, err := pm.client.Download(ctx, url, f)
+	_, err = pm.client.Download(ctx, url, f)
 	if err != nil {
 		return fmt.Errorf("downloading: %w", err)
 	}
 
-	pm.logger.Printf("  Downloaded %d bytes to %s", written, destPath)
 	return nil
 }
 
 // verifyFileHash verifies the SHA1 hash of a file (Alpine uses SHA1 in C: field)
 func (pm *PackageManager) verifyFileHash(filePath, expectedHash string) error {
-	pm.logger.Printf("Computing SHA1 hash of: %s", filePath)
-
 	f, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("opening file: %w", err)
@@ -323,9 +356,6 @@ func (pm *PackageManager) verifyFileHash(filePath, expectedHash string) error {
 
 	actualHash := hex.EncodeToString(hasher.Sum(nil))
 
-	pm.logger.Printf("  Expected: %s", expectedHash)
-	pm.logger.Printf("  Actual:   %s", actualHash)
-
 	// Alpine uses Q prefix for SHA1 hashes in the format Q1{hash}
 	expectedHashClean := strings.TrimPrefix(expectedHash, "Q1")
 
@@ -333,14 +363,11 @@ func (pm *PackageManager) verifyFileHash(filePath, expectedHash string) error {
 		return fmt.Errorf("hash mismatch: expected %s, got %s", expectedHashClean, actualHash)
 	}
 
-	pm.logger.Printf("  ✓ Hashes match!")
 	return nil
 }
 
 // extractAPKPackage extracts an .apk package (which is a tar.gz archive)
 func (pm *PackageManager) extractAPKPackage(apkPath, installPath string) error {
-	pm.logger.Printf("Extracting .apk package: %s -> %s", apkPath, installPath)
-
 	// Open the .apk file
 	f, err := os.Open(apkPath)
 	if err != nil {
@@ -358,11 +385,6 @@ func (pm *PackageManager) extractAPKPackage(apkPath, installPath string) error {
 	// Create tar reader
 	tarReader := tar.NewReader(gzReader)
 
-	// Track statistics
-	fileCount := 0
-	dirCount := 0
-	symlinkCount := 0
-
 	// Extract each entry
 	for {
 		header, err := tarReader.Next()
@@ -378,7 +400,6 @@ func (pm *PackageManager) extractAPKPackage(apkPath, installPath string) error {
 			strings.HasPrefix(header.Name, ".SIGN.") ||
 			strings.HasPrefix(header.Name, ".post-") ||
 			strings.HasPrefix(header.Name, ".pre-") {
-			pm.logger.Printf("  Skipping metadata: %s", header.Name)
 			continue
 		}
 
@@ -390,8 +411,6 @@ func (pm *PackageManager) extractAPKPackage(apkPath, installPath string) error {
 			if err := os.MkdirAll(targetPath, 0755); err != nil {
 				return fmt.Errorf("creating directory %s: %w", targetPath, err)
 			}
-			dirCount++
-			pm.logger.Printf("  📁 %s/", header.Name)
 
 		case tar.TypeSymlink:
 			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
@@ -402,8 +421,6 @@ func (pm *PackageManager) extractAPKPackage(apkPath, installPath string) error {
 			if err := os.Symlink(header.Linkname, targetPath); err != nil {
 				return fmt.Errorf("creating symlink %s -> %s: %w", targetPath, header.Linkname, err)
 			}
-			symlinkCount++
-			pm.logger.Printf("  🔗 %s -> %s", header.Name, header.Linkname)
 
 		case tar.TypeReg:
 			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
@@ -424,23 +441,8 @@ func (pm *PackageManager) extractAPKPackage(apkPath, installPath string) error {
 			if written != header.Size {
 				return fmt.Errorf("file size mismatch for %s: expected %d, got %d", targetPath, header.Size, written)
 			}
-
-			fileCount++
-			execFlag := ""
-			if header.Mode&0111 != 0 {
-				execFlag = " (executable)"
-			}
-			pm.logger.Printf("  📄 %s (%d bytes)%s", header.Name, header.Size, execFlag)
-
-		default:
-			pm.logger.Printf("  ⚠️  Skipping unsupported file type %v for %s", header.Typeflag, header.Name)
 		}
 	}
-
-	pm.logger.Printf("  ✓ Extraction complete:")
-	pm.logger.Printf("    - %d files", fileCount)
-	pm.logger.Printf("    - %d directories", dirCount)
-	pm.logger.Printf("    - %d symlinks", symlinkCount)
 
 	return nil
 }
