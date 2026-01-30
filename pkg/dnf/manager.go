@@ -403,6 +403,10 @@ func (pm *PackageManager) extractRPMPackage(rpmPath, installPath string) error {
 	// 3. Iterate CPIO archive manually
 	cpioReader := cpio.NewReader(payloadReader)
 
+	// Standard Unix Symlink mode constant
+	const s_IFLNK = 0120000
+	const s_IFMT  = 0170000
+
 	for {
 		header, err := cpioReader.Next()
 		if err == io.EOF {
@@ -431,6 +435,9 @@ func (pm *PackageManager) extractRPMPackage(rpmPath, installPath string) error {
 			mode |= 0644 // Ensure rw for owner
 		}
 
+		// Convert cpio.FileMode (int64) to os.FileMode (uint32) for permission bits
+		perm := os.FileMode(mode & 0777)
+
 		switch {
 		case header.Mode.IsDir():
 			// If directory exists, we might need to chmod it if it was read-only
@@ -439,7 +446,7 @@ func (pm *PackageManager) extractRPMPackage(rpmPath, installPath string) error {
 					os.Chmod(targetPath, info.Mode()|0700)
 				}
 			}
-			if err := os.MkdirAll(targetPath, mode); err != nil {
+			if err := os.MkdirAll(targetPath, perm|os.ModeDir); err != nil {
 				return fmt.Errorf("creating dir %s: %w", targetPath, err)
 			}
 
@@ -457,7 +464,7 @@ func (pm *PackageManager) extractRPMPackage(rpmPath, installPath string) error {
 				os.Remove(targetPath)
 			}
 
-			outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+			outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
 			if err != nil {
 				// Retry loop for weird race conditions or parent perm issues
 				return fmt.Errorf("creating file %s: %w", targetPath, err)
@@ -469,7 +476,7 @@ func (pm *PackageManager) extractRPMPackage(rpmPath, installPath string) error {
 			}
 			outFile.Close()
 
-		case header.Mode&os.ModeSymlink != 0: // cpio symlink handling
+		case (header.Mode & s_IFMT) == s_IFLNK: // Manual check for Symlink using Unix constants
 			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
 				return fmt.Errorf("creating parent dir for symlink: %w", err)
 			}
