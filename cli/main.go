@@ -27,6 +27,8 @@ func main() {
     args := os.Args[2:]
     
     switch command {
+    case "init":
+        handleInitCommand(args)
     case "env":
         handleEnvCommand(args)
     case "install":
@@ -57,11 +59,15 @@ func printUsage() {
 
 Usage: upkg <command> [args]
 
-Environment Management (conda-style):
+Setup (run once):
+  init [bash|zsh|fish]          Generate shell integration code
+                                Add to your shell RC: eval "$(upkg init)"
+
+Environment Management:
   env create <name> [--backend apt|brew|nix|dnf|pacman]
                                 Create new isolated environment
   env list                      List all environments
-  env activate <name>           Activate an environment
+  env activate <name>           Activate an environment (modifies shell)
   env deactivate                Deactivate current environment
   env remove <name>             Remove an environment
   env info [name]               Show environment details
@@ -73,34 +79,226 @@ Package Management:
   info <package>                Show package information
   run <command> [args...]       Run command in active environment
 
-Shell Integration:
-  shell                         Output shell integration code
-                                Usage: eval "$(upkg shell)"
-
 Options:
   --help, -h                    Show this help message
   --version, -v                 Show version
 
+Setup Instructions:
+  1. Add to your ~/.bashrc or ~/.zshrc:
+     eval "$(upkg init)"
+  
+  2. Reload your shell:
+     source ~/.bashrc
+
+  3. Create and activate an environment:
+     upkg env create myproject
+     upkg env activate myproject
+  
+  4. Your prompt will now show: (myproject) user@host:~$
+
 Examples:
-  # Create and use an environment
+  # One-time setup
+  echo 'eval "$(upkg init)"' >> ~/.bashrc
+  source ~/.bashrc
+  
+  # Create and use environment
   upkg env create myproject --backend apt
-  upkg env activate myproject
-  eval "$(upkg shell)"
+  upkg env activate myproject    # Shell automatically modified!
   
   # Install packages
-  upkg install gcc
-  upkg install wget
-  upkg install openssl
+  upkg install gcc wget
   
-  # Run commands
-  upkg run gcc myfile.c -o myfile
-  gcc myfile.c -o myfile  # After eval "$(upkg shell)"
+  # Now commands just work
+  gcc --version
+  wget https://example.com
   
-  # List environments
-  upkg env list
-  
-  # Search for packages
-  upkg search python
+  # Deactivate
+  upkg env deactivate
+`)
+}
+
+func handleInitCommand(args []string) {
+    shell := "bash" // default
+    
+    if len(args) > 0 {
+        shell = args[0]
+    } else {
+        // Auto-detect from SHELL env var
+        if shellEnv := os.Getenv("SHELL"); shellEnv != "" {
+            parts := strings.Split(shellEnv, "/")
+            shell = parts[len(parts)-1]
+        }
+    }
+    
+    switch shell {
+    case "bash":
+        printBashInit()
+    case "zsh":
+        printZshInit()
+    case "fish":
+        printFishInit()
+    default:
+        fmt.Fprintf(os.Stderr, "Unsupported shell: %s\n", shell)
+        fmt.Fprintf(os.Stderr, "Supported: bash, zsh, fish\n")
+        os.Exit(1)
+    }
+}
+
+func printBashInit() {
+    fmt.Print(`# upkg shell integration
+# Add this to your ~/.bashrc or ~/.bash_profile:
+# eval "$(upkg init bash)"
+
+upkg() {
+    if [[ "$1" == "env" ]] && [[ "$2" == "activate" ]]; then
+        # Activation needs to modify current shell
+        if [[ -z "$3" ]]; then
+            echo "Error: upkg env activate requires an environment name" >&2
+            return 1
+        fi
+        
+        # Call upkg to activate and get shell code
+        command upkg env activate "$3" > /dev/null 2>&1
+        
+        if [[ $? -ne 0 ]]; then
+            command upkg env activate "$3"
+            return 1
+        fi
+        
+        # Source the environment
+        eval "$(command upkg shell)"
+        
+        # Set environment variable for prompt
+        export UPKG_ENV="$3"
+        
+    elif [[ "$1" == "env" ]] && [[ "$2" == "deactivate" ]]; then
+        # Deactivation
+        command upkg env deactivate
+        unset UPKG_ENV
+        
+        # Clear the environment by reloading shell defaults
+        if [[ -n "$UPKG_OLD_PATH" ]]; then
+            export PATH="$UPKG_OLD_PATH"
+            unset UPKG_OLD_PATH
+        fi
+        
+    else
+        # For all other commands, just call the binary
+        command upkg "$@"
+    fi
+}
+
+# Modify prompt to show active environment
+__upkg_prompt_command() {
+    if [[ -n "$UPKG_ENV" ]]; then
+        # Remove old upkg prompt if exists
+        PS1="${PS1#\(*\) }"
+        # Add new upkg prompt
+        PS1="($UPKG_ENV) $PS1"
+    else
+        # Remove upkg prompt
+        PS1="${PS1#\(*\) }"
+    fi
+}
+
+# Add to PROMPT_COMMAND
+if [[ -z "$PROMPT_COMMAND" ]]; then
+    PROMPT_COMMAND="__upkg_prompt_command"
+else
+    PROMPT_COMMAND="__upkg_prompt_command;$PROMPT_COMMAND"
+fi
+`)
+}
+
+func printZshInit() {
+    fmt.Print(`# upkg shell integration for Zsh
+# Add this to your ~/.zshrc:
+# eval "$(upkg init zsh)"
+
+upkg() {
+    if [[ "$1" == "env" ]] && [[ "$2" == "activate" ]]; then
+        # Activation needs to modify current shell
+        if [[ -z "$3" ]]; then
+            echo "Error: upkg env activate requires an environment name" >&2
+            return 1
+        fi
+        
+        # Call upkg to activate and get shell code
+        command upkg env activate "$3" > /dev/null 2>&1
+        
+        if [[ $? -ne 0 ]]; then
+            command upkg env activate "$3"
+            return 1
+        fi
+        
+        # Source the environment
+        eval "$(command upkg shell)"
+        
+        # Set environment variable for prompt
+        export UPKG_ENV="$3"
+        
+    elif [[ "$1" == "env" ]] && [[ "$2" == "deactivate" ]]; then
+        # Deactivation
+        command upkg env deactivate
+        unset UPKG_ENV
+        
+    else
+        # For all other commands, just call the binary
+        command upkg "$@"
+    fi
+}
+
+# Modify prompt to show active environment
+precmd() {
+    if [[ -n "$UPKG_ENV" ]]; then
+        PROMPT="%F{green}($UPKG_ENV)%f $PROMPT"
+    fi
+}
+`)
+}
+
+func printFishInit() {
+    fmt.Print(`# upkg shell integration for Fish
+# Add this to your ~/.config/fish/config.fish:
+# upkg init fish | source
+
+function upkg
+    if test "$argv[1]" = "env" -a "$argv[2]" = "activate"
+        if test -z "$argv[3]"
+            echo "Error: upkg env activate requires an environment name" >&2
+            return 1
+        end
+        
+        # Call upkg to activate
+        command upkg env activate $argv[3] > /dev/null 2>&1
+        
+        if test $status -ne 0
+            command upkg env activate $argv[3]
+            return 1
+        end
+        
+        # Source the environment
+        command upkg shell | source
+        
+        # Set environment variable
+        set -gx UPKG_ENV $argv[3]
+        
+    else if test "$argv[1]" = "env" -a "$argv[2]" = "deactivate"
+        command upkg env deactivate
+        set -e UPKG_ENV
+        
+    else
+        command upkg $argv
+    end
+end
+
+# Update prompt
+function fish_prompt
+    if set -q UPKG_ENV
+        echo -n (set_color green)"($UPKG_ENV)"(set_color normal)" "
+    end
+    # Your existing prompt here
+end
 `)
 }
 
@@ -225,11 +423,7 @@ func handleEnvActivate(args []string) {
         os.Exit(1)
     }
     
-    fmt.Printf("✓ Environment '%s' activated.\n\n", name)
-    fmt.Println("To use in your current shell, run:")
-    fmt.Println("  eval \"$(upkg shell)\"")
-    fmt.Println("\nOr add to your ~/.bashrc or ~/.zshrc:")
-    fmt.Println("  eval \"$(upkg shell)\"")
+    fmt.Printf("✓ Environment '%s' activated.\n", name)
 }
 
 func handleEnvDeactivate(args []string) {
@@ -238,8 +432,6 @@ func handleEnvDeactivate(args []string) {
         os.Exit(1)
     }
     fmt.Println("✓ Environment deactivated")
-    fmt.Println("\nRun this to update your shell:")
-    fmt.Println("  eval \"$(upkg shell)\"")
 }
 
 func handleEnvRemove(args []string) {
