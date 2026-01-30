@@ -7,13 +7,13 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/cavaliergopher/cpio"
 	"github.com/sassoftware/go-rpmutils"
 )
 
@@ -168,7 +168,7 @@ func (pm *PackageManager) installRecursive(ctx context.Context, pkgRequest strin
 		}
 	}
 
-	// 5. Extract package
+	// 5. Extract package with retry logic for permissions
 	if opts.Extract {
 		pm.logger.Printf("Extracting %s...", pkgInfo.Name)
 		if err := pm.extractRPMPackage(rpmPath, pm.config.InstallPath); err != nil {
@@ -375,120 +375,67 @@ func (pm *PackageManager) verifyFileHash(filePath, expectedHash, hashType string
 	return nil
 }
 
-// extractRPMPackage extracts an .rpm package with PERMISSION OVERRIDES
-// This ensures that we don't lock ourselves out of directories (e.g. /usr/bin mode 0555)
+// extractRPMPackage with Retry on Permission Denied
 func (pm *PackageManager) extractRPMPackage(rpmPath, installPath string) error {
 	if err := os.MkdirAll(installPath, 0755); err != nil {
 		return fmt.Errorf("creating install directory: %w", err)
 	}
 
-	f, err := os.Open(rpmPath)
-	if err != nil {
-		return fmt.Errorf("opening rpm file: %w", err)
-	}
-	defer f.Close()
-
-	// 1. Read RPM Header to find Payload compression
-	pkg, err := rpmutils.ReadRpm(f)
-	if err != nil {
-		return fmt.Errorf("reading rpm package: %w", err)
-	}
-
-	// 2. Get the CPIO stream (handles gzip/xz/zstd automatically)
-	payloadReader, err := pkg.PayloadReader()
-	if err != nil {
-		return fmt.Errorf("getting payload reader: %w", err)
-	}
-
-	// 3. Iterate CPIO archive manually
-	cpioReader := cpio.NewReader(payloadReader)
-
-	// Standard Unix Symlink mode constant
-	const s_IFLNK = 0120000
-	const s_IFMT  = 0170000
-
-	for {
-		header, err := cpioReader.Next()
-		if err == io.EOF {
-			break
-		}
+	// Function to perform extraction
+	extract := func() error {
+		f, err := os.Open(rpmPath)
 		if err != nil {
-			return fmt.Errorf("reading cpio entry: %w", err)
+			return err
+		}
+		defer f.Close()
+
+		rpm, err := rpmutils.ReadRpm(f)
+		if err != nil {
+			return err
 		}
 
-		// Sanitize path to prevent ZipSlip (absolute or parent traversal)
-		relPath := strings.TrimPrefix(header.Name, "./")
-		relPath = strings.TrimPrefix(relPath, "/")
-		if strings.Contains(relPath, "..") {
-			continue // Skip unsafe paths
+		if err := rpm.ExpandPayload(installPath); err != nil {
+			return err
 		}
+		return nil
+	}
 
-		targetPath := filepath.Join(installPath, relPath)
-
-		// 4. FORCE WRITE PERMISSIONS
-		// We OR the mode with 0200 (user writeable) and ensure 0700 for directories
-		// This fixes the "permission denied" errors when packages set 0555 on /usr/bin
-		mode := header.Mode
-		if header.Mode.IsDir() {
-			mode |= 0755 // Ensure rwx for owner
-		} else {
-			mode |= 0644 // Ensure rw for owner
-		}
-
-		// Convert cpio.FileMode (int64) to os.FileMode (uint32) for permission bits
-		perm := os.FileMode(mode & 0777)
-
-		switch {
-		case header.Mode.IsDir():
-			// If directory exists, we might need to chmod it if it was read-only
-			if info, err := os.Stat(targetPath); err == nil {
-				if info.Mode().Perm()&0200 == 0 {
-					os.Chmod(targetPath, info.Mode()|0700)
-				}
-			}
-			if err := os.MkdirAll(targetPath, perm|os.ModeDir); err != nil {
-				return fmt.Errorf("creating dir %s: %w", targetPath, err)
-			}
-
-		case header.Mode.IsRegular():
-			// Ensure parent exists
-			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
-				return fmt.Errorf("creating parent dir: %w", err)
-			}
-
-			// If file exists and is read-only, force remove or chmod
-			if info, err := os.Stat(targetPath); err == nil {
-				if info.Mode().Perm()&0200 == 0 {
-					os.Chmod(targetPath, info.Mode()|0600)
-				}
-				os.Remove(targetPath)
-			}
-
-			outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
-			if err != nil {
-				// Retry loop for weird race conditions or parent perm issues
-				return fmt.Errorf("creating file %s: %w", targetPath, err)
+	// Try extraction
+	err := extract()
+	
+	// If permission error, fix permissions and retry
+	if err != nil && (strings.Contains(err.Error(), "permission denied") || strings.Contains(err.Error(), "access denied")) {
+		pm.logger.Printf("  ⚠️  Permission denied during extraction. Fixing permissions and retrying...")
+		
+		// Force write permissions on everything in install path
+		errFix := filepath.WalkDir(installPath, func(path string, d fs.DirEntry, err error) error {
+			if err != nil { return nil } // Ignore walk errors
+			
+			info, err := d.Info()
+			if err != nil { return nil }
+			
+			mode := info.Mode()
+			newMode := mode | 0200 // Add user write permission
+			if mode.IsDir() {
+				newMode |= 0700 // Add user read/write/execute for dirs
 			}
 			
-			if _, err := io.Copy(outFile, cpioReader); err != nil {
-				outFile.Close()
-				return fmt.Errorf("writing file %s: %w", targetPath, err)
+			if mode != newMode {
+				_ = os.Chmod(path, newMode)
 			}
-			outFile.Close()
-
-		case (header.Mode & s_IFMT) == s_IFLNK: // Manual check for Symlink using Unix constants
-			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
-				return fmt.Errorf("creating parent dir for symlink: %w", err)
-			}
-			// Remove existing
-			os.Remove(targetPath)
-			
-			// header.Linkname contains the target
-			if err := os.Symlink(header.Linkname, targetPath); err != nil {
-				// Ignore symlink errors (sometimes point to invalid places in partial installs)
-				pm.logger.Printf("Warning: failed to create symlink %s -> %s: %v", targetPath, header.Linkname, err)
-			}
+			return nil
+		})
+		
+		if errFix != nil {
+			pm.logger.Printf("  ⚠️  Failed to fix permissions: %v", errFix)
 		}
+
+		// Retry extraction
+		err = extract()
+	}
+
+	if err != nil {
+		return fmt.Errorf("expanding rpm payload: %w", err)
 	}
 
 	return nil
