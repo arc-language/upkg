@@ -1,0 +1,14 @@
+name = "libc"
+# The linker flag needed: -lc
+libs = ["c"]
+
+[backends]
+apt     = "libc6-dev"
+dpkg    = "libc6-dev"
+dnf     = "glibc-devel"
+pacman  = "glibc"
+apk     = "musl-dev"
+zypper  = "glibc-devel"
+nix     = "glibc"
+brew    = "glibc" 
+winget  = "Microsoft.VCRedist.2015+.x64"
