@@ -45,19 +45,20 @@ func NewPackageManager(cfg *Config) *PackageManager {
 	}
 
 	return &PackageManager{
-		client: NewClient(cfg.Timeout),
+		client: NewClient(cfg.Timeout, logger),
 		config: cfg,
 		logger: logger,
 	}
 }
 
 func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) error {
-	pm.logger.Printf("Searching for manifest: %s (Version: %s)", opts.Package, opts.Version)
+	pm.logger.Printf("Searching for package: %s", opts.Package)
 
-	// 1. Resolve Version if empty
+	// 1. Resolve Package ID and Version
+	id := opts.Package
 	version := opts.Version
+	
 	if version == "" || version == "latest" {
-		// Search to find the latest version
 		results, err := pm.client.Search(ctx, opts.Package)
 		if err != nil {
 			return fmt.Errorf("searching for package: %w", err)
@@ -66,47 +67,49 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 			return fmt.Errorf("package '%s' not found", opts.Package)
 		}
 		
-		// Exact match preference or first result
+		// Attempt to find exact match or fallback to first
+		var entry PackageEntry
 		found := false
 		for _, p := range results {
 			if strings.EqualFold(p.ID, opts.Package) || strings.EqualFold(p.Latest.Name, opts.Package) {
-				version = p.Versions[len(p.Versions)-1] // Assuming sorted, usually last is latest
-				// Better: use the one marked latest in metadata if available, but API returns list
-				// winget.run usually puts latest version at top of versions list or similar. 
-				// Let's assume index 0 is latest for now or check p.Latest
-				// Actually, p.Versions is usually just strings. Let's pick the last one or default to "latest"
-				if len(p.Versions) > 0 {
-					version = p.Versions[len(p.Versions)-1]
-				}
-				opts.Package = p.ID // Normalize ID
+				entry = p
 				found = true
 				break
 			}
 		}
 		if !found {
-			// Default to first result
-			opts.Package = results[0].ID
-			if len(results[0].Versions) > 0 {
-				version = results[0].Versions[len(results[0].Versions)-1]
-			}
+			entry = results[0]
 		}
-		pm.logger.Printf("Resolved version: %s", version)
+		
+		id = entry.ID
+		if len(entry.Versions) > 0 {
+			// Try the last version in the list (usually latest)
+			version = entry.Versions[len(entry.Versions)-1]
+		} else {
+			version = "latest"
+		}
+		pm.logger.Printf("Resolved: %s @ %s", id, version)
 	}
 
-	// 2. Get Manifest
-	manifest, err := pm.client.GetManifest(ctx, opts.Package, version)
+	// 2. Get Manifest (with fallback)
+	manifest, err := pm.client.GetManifest(ctx, id, version)
 	if err != nil {
-		return fmt.Errorf("fetching manifest: %w", err)
+		// If specific version failed, try "latest" literal as fallback
+		pm.logger.Printf("Failed to get version %s, trying 'latest'...", version)
+		manifest, err = pm.client.GetManifest(ctx, id, "latest")
+		if err != nil {
+			return fmt.Errorf("fetching manifest: %w", err)
+		}
+		version = "latest"
 	}
 
-	// 3. Select Installer based on Architecture
+	// 3. Select Installer
 	targetArch := opts.Architecture
 	if targetArch == "" {
 		targetArch = runtime.GOARCH
 	}
 	wingetArch, ok := SupportedArchitectures[targetArch]
 	if !ok {
-		// Fallback to x86/x64 if on arm64/windows via translation, but for now strict
 		wingetArch = targetArch 
 	}
 
@@ -116,7 +119,7 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 			bestInstaller = &inst
 			break
 		}
-		// Fallback: if we are on x64, we can run x86
+		// Fallback: x64 can run x86
 		if wingetArch == "x64" && strings.EqualFold(inst.Architecture, "x86") {
 			if bestInstaller == nil {
 				bestInstaller = &inst
@@ -132,6 +135,10 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 
 	// 4. Download
 	fileName := fmt.Sprintf("%s-%s.%s", manifest.PackageName, version, determineExtension(bestInstaller))
+	// Sanitize filename
+	fileName = strings.ReplaceAll(fileName, "/", "_")
+	fileName = strings.ReplaceAll(fileName, "\\", "_")
+	
 	destPath := filepath.Join(pm.config.CachePath, "downloads", fileName)
 	
 	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
@@ -159,10 +166,6 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 	}
 
 	// 6. Install / Extract
-	// Since upkg focuses on environments, we try to extract "portable" contents.
-	// If it's a Zip, we unzip. If it's an EXE/MSI, we just move it to the install path
-	// or warn the user that it needs manual installation.
-	
 	installDir := filepath.Join(pm.config.InstallPath, manifest.PackageIdentifier)
 	
 	if opts.Extract && (bestInstaller.InstallerType == InstallerTypeZip || strings.HasSuffix(bestInstaller.InstallerUrl, ".zip")) {
@@ -171,15 +174,12 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 			return fmt.Errorf("extracting zip: %w", err)
 		}
 	} else {
-		// For opaque installers (exe, msi), we copy the installer itself to the bin dir
-		// so the user can run it, OR if it's "Portable" type, sometimes it's just the exe.
 		pm.logger.Printf("Moving installer to %s", installDir)
 		if err := os.MkdirAll(installDir, 0755); err != nil {
 			return err
 		}
 		finalPath := filepath.Join(installDir, fileName)
 		
-		// Move/Copy file
 		input, _ := os.ReadFile(destPath)
 		os.WriteFile(finalPath, input, 0755)
 		
@@ -199,7 +199,6 @@ func (pm *PackageManager) Search(ctx context.Context, query string) ([]PackageEn
 }
 
 func (pm *PackageManager) GetInfo(ctx context.Context, name string) (*Manifest, error) {
-	// Need to resolve ID first if name is fuzzy
 	results, err := pm.client.Search(ctx, name)
 	if err != nil {
 		return nil, err
@@ -208,7 +207,6 @@ func (pm *PackageManager) GetInfo(ctx context.Context, name string) (*Manifest, 
 		return nil, fmt.Errorf("package not found")
 	}
 	
-	// Use the first result's ID and latest version
 	id := results[0].ID
 	version := "latest"
 	if len(results[0].Versions) > 0 {

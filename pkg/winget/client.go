@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"time"
@@ -14,25 +15,31 @@ import (
 type Client struct {
 	httpClient *http.Client
 	baseURL    string
+	logger     *log.Logger
 }
 
-func NewClient(timeout time.Duration) *Client {
+func NewClient(timeout time.Duration, logger *log.Logger) *Client {
+	if logger == nil {
+		logger = log.New(io.Discard, "", 0)
+	}
 	return &Client{
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
 		baseURL: APIBaseURL,
+		logger:  logger,
 	}
 }
 
 // Search searches for packages by query string
 func (c *Client) Search(ctx context.Context, query string) ([]PackageEntry, error) {
-	// Endpoint: /v2/packages?query={query}&take=10
 	u, _ := url.Parse(fmt.Sprintf("%s/packages", c.baseURL))
 	q := u.Query()
 	q.Set("query", query)
-	q.Set("take", "20") // Limit results
+	q.Set("take", "20")
 	u.RawQuery = q.Encode()
+
+	c.logger.Printf("[Winget API] Searching: %s", u.String())
 
 	req, err := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
 	if err != nil {
@@ -49,14 +56,10 @@ func (c *Client) Search(ctx context.Context, query string) ([]PackageEntry, erro
 		return nil, fmt.Errorf("API request failed with status: %d", resp.StatusCode)
 	}
 
-	// The API returns a wrapper for search
 	var result struct {
 		Packages []PackageEntry `json:"Packages"`
-		// API v2 sometimes returns array directly or inside a wrapper depending on the specific endpoint variant
-		// We'll try to decode into the expected wrapper for /packages
 	}
 
-	// Note: winget.run v2 usually returns { "Packages": [...], "Total": ... }
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decoding search response: %w", err)
 	}
@@ -66,14 +69,11 @@ func (c *Client) Search(ctx context.Context, query string) ([]PackageEntry, erro
 
 // GetManifest fetches the full manifest for a specific package and version
 func (c *Client) GetManifest(ctx context.Context, id, version string) (*Manifest, error) {
-	// Endpoint: /v2/manifests/{id}/{version}
-	// Note: version can be "latest" in some APIs, but winget.run usually requires specific version.
-	// We'll try to use the version string provided.
-
 	encodedID := url.PathEscape(id)
 	encodedVersion := url.PathEscape(version)
 	
 	url := fmt.Sprintf("%s/manifests/%s/%s", c.baseURL, encodedID, encodedVersion)
+	c.logger.Printf("[Winget API] Fetching Manifest: %s", url)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -87,7 +87,7 @@ func (c *Client) GetManifest(ctx context.Context, id, version string) (*Manifest
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("manifest not found")
+		return nil, fmt.Errorf("manifest not found for %s @ %s", id, version)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("API request failed with status: %d", resp.StatusCode)
@@ -103,6 +103,8 @@ func (c *Client) GetManifest(ctx context.Context, id, version string) (*Manifest
 
 // DownloadFile downloads a file from a URL to a writer
 func (c *Client) DownloadFile(ctx context.Context, url string, w io.Writer) error {
+	c.logger.Printf("[Winget API] Downloading File: %s", url)
+	
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return err
