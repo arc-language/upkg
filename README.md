@@ -14,14 +14,14 @@
 
 ## Quick Start
 ```bash
-# Create an isolated environment
-upkg env create myproject --backend winget
+# Create an isolated environment (auto mode, no backend needed)
+upkg env create myproject
 
 # Activate it
 upkg env activate myproject
 eval "$(upkg shell)"
 
-# Install packages
+# Install packages — upkg figures out the rest
 upkg install curl git openssl
 
 # Now commands just work!
@@ -65,11 +65,11 @@ upkg help
 
 Create isolated package environments for different projects:
 ```bash
-# Create a new environment (Windows example)
-upkg env create myproject --backend winget
+# Create a new environment (auto mode — detects backend for your system)
+upkg env create myproject
 
-# Create a new environment (Linux example)
-upkg env create linux-dev --backend nix
+# Or explicitly set a backend
+upkg env create myproject --backend nix
 
 # List all environments
 upkg env list
@@ -128,8 +128,8 @@ upkg run gcc myfile.c -o myfile
 
 ### Complete Workflow Example
 ```bash
-# 1. Create environment for a C++ project
-upkg env create cpp-dev --backend nix
+# 1. Create environment for a C++ project (auto mode)
+upkg env create cpp-dev
 upkg env activate cpp-dev
 eval "$(upkg shell)"
 
@@ -141,12 +141,12 @@ gcc myprogram.c -o myprogram
 ./myprogram
 
 # 4. Create another environment for Python
-upkg env create python-ml --backend winget
+upkg env create python-ml
 upkg env activate python-ml
 eval "$(upkg shell)"
 
 # 5. Install Python tools
-upkg install Python.Python.3.11
+upkg install python3
 
 # 6. Switch between environments
 upkg env activate cpp-dev
@@ -186,8 +186,8 @@ func main() {
     // 1. Create environment manager
     envMgr := env.NewEnvironmentManager("")
     
-    // 2. Create a new environment
-    envSpec, err := envMgr.CreateEnv("myproject", "winget")
+    // 2. Create a new environment (auto mode)
+    envSpec, err := envMgr.CreateEnv("myproject", "auto")
     if err != nil {
         log.Fatal(err)
     }
@@ -195,22 +195,22 @@ func main() {
     // 3. Activate it
     envMgr.ActivateEnv("myproject")
     
-    // 4. Install packages to this environment
+    // 4. Install packages — auto mode resolves names via registry
     config := upkg.DefaultConfig()
     config.InstallPath = envSpec.InstallPath
     
-    mgr, err := upkg.NewManager(upkg.BackendWinget, config)
+    mgr, err := upkg.NewManager(upkg.BackendAuto, config)
     if err != nil {
         log.Fatal(err)
     }
     defer mgr.Close()
     
-    pkg := &upkg.Package{Name: "cURL.cURL"}
+    pkg := &upkg.Package{Name: "openssl"}
     if err := mgr.Download(context.Background(), pkg, nil); err != nil {
         log.Fatal(err)
     }
     
-    fmt.Println("Successfully installed cURL!")
+    fmt.Println("Successfully installed openssl!")
 }
 ```
 
@@ -226,8 +226,8 @@ import (
 )
 
 func main() {
-    // 1. Create a Manager
-    // BackendAuto will check for Winget, Apt, Dnf, Brew, Nix, etc.
+    // BackendAuto detects native backend and resolves package names
+    // via the registry automatically
     config := upkg.DefaultConfig()
     mgr, err := upkg.NewManager(upkg.BackendAuto, config)
     if err != nil {
@@ -237,14 +237,13 @@ func main() {
 
     fmt.Printf("Using backend: %s\n", mgr.Backend())
 
-    // 2. Define the package
+    // Use the friendly name — registry handles the rest
     pkg := &upkg.Package{
-        Name: "ripgrep",
+        Name: "curl",
     }
     
-    // 3. Download/Install
     opts := &upkg.DownloadOptions{
-        VerifyHash:  nil, // defaults to true
+        VerifyHash: nil, // defaults to true
     }
 
     ctx := context.Background()
@@ -252,7 +251,7 @@ func main() {
         log.Fatalf("Failed to install: %v", err)
     }
 
-    fmt.Println("Successfully installed ripgrep!")
+    fmt.Println("Successfully installed curl!")
 }
 ```
 
@@ -298,6 +297,8 @@ for _, flag := range flags.IncludeFlags {
 
 ## Supported Backends
 
+upkg supports a wide range of native package managers. Each backend knows how to download, extract, and install packages for its platform.
+
 | Backend | Flag | System | Status |
 |:---|:---:|:---|:---:|
 | **Winget** | `winget` | Windows | ✅ Stable |
@@ -311,6 +312,56 @@ for _, flag := range flags.IncludeFlags {
 | **Zypper** | `zypper` | OpenSUSE | ✅ Stable |
 | **Chocolatey** | `choco` | Windows | ✅ Stable |
 
+You can force a specific backend when creating an environment:
+```bash
+upkg env create myproject --backend nix
+```
+
+---
+
+## Auto Mode
+
+By default, upkg runs in **auto mode** — no backend flag needed. It does two things automatically:
+
+**1. Detects your native backend.** When you run on Ubuntu it picks `dpkg`. On macOS it picks `brew`. On Windows it picks `winget`. On Arch it picks `pacman`. You never have to think about it.
+
+**2. Resolves package names via the registry.** Every package manager on earth calls the same library something different. OpenSSL is `libssl-dev` on Debian, `openssl-devel` on Fedora, `openssl@3` on Homebrew, `OpenSSL.OpenSSL` on Winget. The registry maps one friendly name to all of them:
+
+```
+deps/
+├── sqlite3/
+│   └── index.toml      # apt = "libsqlite3-dev", brew = "sqlite", ...
+├── openssl/
+│   └── index.toml      # apt = "libssl-dev", brew = "openssl@3", ...
+└── curl/
+    └── index.toml      # apt = "libcurl4-openssl-dev", brew = "curl", ...
+```
+
+So you just write:
+```bash
+upkg install sqlite3
+upkg install openssl
+upkg install curl
+```
+
+And it works on any platform, no changes needed.
+
+**As the registry grows**, it will cover more and more of the common ecosystem automatically — generic libraries, development headers, binary tools, and so on. Each new entry in `deps/` instantly makes that package available on every supported platform at once. Adding a package is as simple as adding a folder with one TOML file mapping the native names per backend.
+
+---
+
+## Features
+
+- **Cross-platform**: Works on Linux, macOS, and Windows
+- **Auto mode**: Detects backend and resolves package names automatically
+- **Backend flexibility**: Optionally choose from winget, nix, apt, dnf, brew, and more
+- **Registry-driven**: Friendly package names resolve to native names per platform
+- **Isolated Environments**: Keep project dependencies separate
+- **Index Syncing**: Automatically downloads package registry and indices on first run
+- **Smart library detection**: Automatically finds libraries and headers
+- **Compiler integration**: Generate flags for gcc, clang, etc.
+- **No system pollution**: Install packages without affecting system
+
 ---
 
 ## Project Structure
@@ -320,6 +371,13 @@ upkg/
 ├── cmd/
 │   └── upkg/
 │       └── main.go      # CLI entry point
+├── deps/                # Package registry (name mappings per backend)
+│   ├── sqlite3/
+│   │   └── index.toml
+│   ├── openssl/
+│   │   └── index.toml
+│   └── curl/
+│       └── index.toml
 └── pkg/
     ├── backend/         # Backend implementations
     │   ├── winget.go    # Windows Winget logic
@@ -327,6 +385,8 @@ upkg/
     │   ├── apt.go       # Ubuntu/Debian logic
     │   ├── brew.go      # Homebrew logic
     │   └── ...          # (apk, dnf, dpkg, pacman, zypper)
+    ├── registry/        # Registry lookup and alias resolution
+    │   └── registry.go
     ├── env/             # Environment management
     │   ├── environment.go
     │   ├── environment_manager.go
@@ -339,19 +399,40 @@ upkg/
 
 ---
 
-## Features
-
-- **Cross-platform**: Works on Linux, macOS, and Windows
-- **Backend flexibility**: Choose from winget, nix, apt, dnf, brew, and more
-- **Isolated Environments**: Keep project dependencies separate
-- **Index Syncing**: Automatically downloads package indices for Winget and Nix
-- **Smart library detection**: Automatically finds libraries and headers
-- **Compiler integration**: Generate flags for gcc, clang, etc.
-- **No system pollution**: Install packages without affecting system
-
----
-
 ## Contributing
+
+### Adding a package to the registry
+
+1. Create a folder under `deps/` with the package name
+2. Add an `index.toml` with the native package name for each backend
+3. Submit a Pull Request
+
+Example — adding `zlib`:
+```
+deps/
+└── zlib/
+    └── index.toml
+```
+
+```toml
+# deps/zlib/index.toml
+
+aliases = ["z"]
+
+[backends]
+apt     = "zlib1g-dev"
+dpkg    = "zlib1g-dev"
+dnf     = "zlib-devel"
+brew    = "zlib"
+winget  = "zlib.zlib"
+pacman  = "zlib"
+apk     = "zlib-dev"
+zypper  = "zlib-devel"
+choco   = "zlib"
+nix     = "zlib"
+```
+
+### Adding a new backend
 
 1. Fork the repo
 2. Create a feature branch
