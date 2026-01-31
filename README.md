@@ -6,7 +6,7 @@
 
 <p align="center">
     <img src="https://img.shields.io/badge/Version-1.0-blue" alt="Version">
-    <img src="https://img.shields.io/badge/Backends-Nix%20%7C%20Brew%20%7C%20Apt%20%7C%20Dnf%20%7C%20Choco-purple" alt="Backends">
+    <img src="https://img.shields.io/badge/Backends-Nix%20%7C%20Winget%20%7C%20Brew%20%7C%20Apt%20%7C%20Dnf%20%7C%20Choco-purple" alt="Backends">
     <img src="https://img.shields.io/badge/License-MIT%20%7C%20Apache--2.0-green" alt="License">
 </p>
 
@@ -15,21 +15,21 @@
 ## Quick Start
 ```bash
 # Create an isolated environment
-upkg env create myproject --backend apt
+upkg env create myproject --backend winget
 
 # Activate it
 upkg env activate myproject
 eval "$(upkg shell)"
 
 # Install packages
-upkg install gcc wget openssl
+upkg install curl git openssl
 
 # Now commands just work!
-gcc --version
-wget https://example.com
+curl --version
+git --version
 ```
 
-**upkg** is a unified interface for package management. It abstracts away the differences between `apt`, `dnf`, `brew`, `nix`, `choco`, and more, giving you a single CLI and a single Go API to manage software on any operating system.
+**upkg** is a unified interface for package management. It abstracts away the differences between `winget`, `nix`, `apt`, `dnf`, `brew`, `choco`, and more, giving you a single CLI and a single Go API to manage software on any operating system.
 
 ---
 
@@ -46,7 +46,10 @@ cd cmd/upkg
 go build -o upkg main.go
 
 # 3. Move to path (optional)
+# Linux/macOS
 sudo mv upkg /usr/local/bin/
+# Windows (PowerShell)
+mv upkg.exe C:\Windows\System32\
 ```
 
 Now you are ready to run:
@@ -62,8 +65,11 @@ upkg help
 
 Create isolated package environments for different projects:
 ```bash
-# Create a new environment
-upkg env create myproject --backend apt
+# Create a new environment (Windows example)
+upkg env create myproject --backend winget
+
+# Create a new environment (Linux example)
+upkg env create linux-dev --backend nix
 
 # List all environments
 upkg env list
@@ -123,24 +129,24 @@ upkg run gcc myfile.c -o myfile
 ### Complete Workflow Example
 ```bash
 # 1. Create environment for a C++ project
-upkg env create cpp-dev --backend apt
+upkg env create cpp-dev --backend nix
 upkg env activate cpp-dev
 eval "$(upkg shell)"
 
 # 2. Install development tools
-upkg install gcc g++ cmake make
+upkg install gcc cmake make
 
 # 3. Work on your project
 gcc myprogram.c -o myprogram
 ./myprogram
 
 # 4. Create another environment for Python
-upkg env create python-ml --backend brew
+upkg env create python-ml --backend winget
 upkg env activate python-ml
 eval "$(upkg shell)"
 
 # 5. Install Python tools
-upkg install python3 numpy
+upkg install Python.Python.3.11
 
 # 6. Switch between environments
 upkg env activate cpp-dev
@@ -181,7 +187,7 @@ func main() {
     envMgr := env.NewEnvironmentManager("")
     
     // 2. Create a new environment
-    envSpec, err := envMgr.CreateEnv("myproject", "apt")
+    envSpec, err := envMgr.CreateEnv("myproject", "winget")
     if err != nil {
         log.Fatal(err)
     }
@@ -193,18 +199,18 @@ func main() {
     config := upkg.DefaultConfig()
     config.InstallPath = envSpec.InstallPath
     
-    mgr, err := upkg.NewManager(upkg.BackendApt, config)
+    mgr, err := upkg.NewManager(upkg.BackendWinget, config)
     if err != nil {
         log.Fatal(err)
     }
     defer mgr.Close()
     
-    pkg := &upkg.Package{Name: "gcc"}
+    pkg := &upkg.Package{Name: "cURL.cURL"}
     if err := mgr.Download(context.Background(), pkg, nil); err != nil {
         log.Fatal(err)
     }
     
-    fmt.Println("Successfully installed gcc!")
+    fmt.Println("Successfully installed cURL!")
 }
 ```
 
@@ -221,7 +227,7 @@ import (
 
 func main() {
     // 1. Create a Manager
-    // BackendAuto will check for Apt, Dnf, Brew, Choco, Nix, etc.
+    // BackendAuto will check for Winget, Apt, Dnf, Brew, Nix, etc.
     config := upkg.DefaultConfig()
     mgr, err := upkg.NewManager(upkg.BackendAuto, config)
     if err != nil {
@@ -294,6 +300,7 @@ for _, flag := range flags.IncludeFlags {
 
 | Backend | Flag | System | Status |
 |:---|:---:|:---|:---:|
+| **Winget** | `winget` | Windows | ✅ Stable |
 | **Nix** | `nix` | Linux / macOS | ✅ Stable |
 | **Homebrew** | `brew` | macOS / Linux | ✅ Stable |
 | **APT** | `apt` | Ubuntu / Debian | ✅ Stable |
@@ -315,18 +322,19 @@ upkg/
 │       └── main.go      # CLI entry point
 └── pkg/
     ├── backend/         # Backend implementations
+    │   ├── winget.go    # Windows Winget logic
+    │   ├── nix.go       # Linux/macOS Nix logic
     │   ├── apt.go       # Ubuntu/Debian logic
     │   ├── brew.go      # Homebrew logic
-    │   ├── choco.go     # Windows Chocolatey logic
-    │   ├── nix.go       # Nix logic
     │   └── ...          # (apk, dnf, dpkg, pacman, zypper)
     ├── env/             # Environment management
     │   ├── environment.go
     │   ├── environment_manager.go
     │   ├── library.go
     │   └── constants.go
-    ├── apt/             # APT package manager implementation
-    └── ...              # Internal package manager drivers
+    ├── index/           # Package index syncing (Git)
+    ├── winget/          # Winget parser & driver
+    └── nix/             # Nix parser & driver
 ```
 
 ---
@@ -334,8 +342,9 @@ upkg/
 ## Features
 
 - **Cross-platform**: Works on Linux, macOS, and Windows
-- **Backend flexibility**: Choose from apt, dnf, brew, nix, choco, and more
-- **environments**: Keep project dependencies separate
+- **Backend flexibility**: Choose from winget, nix, apt, dnf, brew, and more
+- **Isolated Environments**: Keep project dependencies separate
+- **Index Syncing**: Automatically downloads package indices for Winget and Nix
 - **Smart library detection**: Automatically finds libraries and headers
 - **Compiler integration**: Generate flags for gcc, clang, etc.
 - **No system pollution**: Install packages without affecting system
