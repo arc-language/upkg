@@ -1,4 +1,4 @@
-// types.go
+// pkg/nix/types.go
 package nix
 
 import (
@@ -6,20 +6,21 @@ import (
 	"time"
 )
 
+// Package represents an entry in the JSON index
+type Package struct {
+	Attribute   string `json:"Attribute"`
+	NameVersion string `json:"NameVersion"`
+	StorePath   string `json:"StorePath"`
+}
+
 // Config configures the package manager
 type Config struct {
 	CacheURL    string        // Default: https://cache.nixos.org
 	InstallPath string        // Default: /nix/store
+	CachePath   string        // Location of local cache/index files
 	Timeout     time.Duration
 	Debug       bool          // Enable debug logging
 	Logger      *log.Logger   // Custom logger (optional)
-}
-
-// PackageManager handles Nix package operations
-type PackageManager struct {
-	client *Client
-	config *Config
-	logger *log.Logger
 }
 
 // NARInfo contains metadata about a Nix package
