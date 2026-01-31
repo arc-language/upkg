@@ -14,12 +14,13 @@ type PackageEntry struct {
 	ID          string      `json:"Id"`
 	Versions    []string    `json:"Versions"`
 	Latest      VersionInfo `json:"Latest"`
-	UpdatedAt   string      `json:"UpdatedAt"` // Changed to string to handle non-standard API time formats
+	UpdatedAt   string      `json:"UpdatedAt"`
 	SearchScore float64     `json:"SearchScore,omitempty"`
 }
 
 // VersionInfo contains metadata about a specific version
 type VersionInfo struct {
+	Version     string   `json:"Version"` // Added Version field
 	Name        string   `json:"Name"`
 	Publisher   string   `json:"Publisher"`
 	Description string   `json:"Description"`

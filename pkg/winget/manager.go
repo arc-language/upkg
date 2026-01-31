@@ -67,40 +67,89 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 			return fmt.Errorf("package '%s' not found", opts.Package)
 		}
 		
-		// Attempt to find exact match or fallback to first
+		// Improve matching logic
+		// Priority:
+		// 1. Exact ID match (case-insensitive)
+		// 2. Exact Name match (case-insensitive)
+		// 3. ID ends with ".<Package>" (e.g. searching "wget" matches "Jeremys.wget")
+		
 		var entry PackageEntry
 		found := false
+		
+		// 1. Exact ID Match
 		for _, p := range results {
-			if strings.EqualFold(p.ID, opts.Package) || strings.EqualFold(p.Latest.Name, opts.Package) {
+			if strings.EqualFold(p.ID, opts.Package) {
 				entry = p
 				found = true
 				break
 			}
 		}
+		
+		// 2. Exact Name Match
 		if !found {
+			for _, p := range results {
+				if strings.EqualFold(p.Latest.Name, opts.Package) {
+					entry = p
+					found = true
+					break
+				}
+			}
+		}
+
+		// 3. Suffix Match on ID (Common in Winget, e.g., Publisher.App)
+		if !found {
+			suffix := "." + strings.ToLower(opts.Package)
+			for _, p := range results {
+				if strings.HasSuffix(strings.ToLower(p.ID), suffix) {
+					entry = p
+					found = true
+					break
+				}
+			}
+		}
+
+		if !found {
+			// Fallback: If we didn't find a good match, picking result[0] is risky.
+			// Only pick it if the search score is high or it looks somewhat relevant.
+			// For now, we'll log a warning and pick the first one, but this is often where 'Kate' comes from for 'wget'.
+			pm.logger.Printf("Warning: No exact match found for '%s'. Using best guess: %s", opts.Package, results[0].ID)
 			entry = results[0]
+		} else {
+			pm.logger.Printf("Found match: %s", entry.ID)
 		}
 		
 		id = entry.ID
+		
+		// Resolve Version
 		if len(entry.Versions) > 0 {
 			// Try the last version in the list (usually latest)
 			version = entry.Versions[len(entry.Versions)-1]
+		} else if entry.Latest.Version != "" {
+			// Use the version from the Latest info block
+			version = entry.Latest.Version
 		} else {
+			// We have no version string. winget.run might not support "latest" in manifest path.
+			// But we have no choice.
 			version = "latest"
 		}
+		
 		pm.logger.Printf("Resolved: %s @ %s", id, version)
 	}
 
-	// 2. Get Manifest (with fallback)
+	// 2. Get Manifest
 	manifest, err := pm.client.GetManifest(ctx, id, version)
 	if err != nil {
-		// If specific version failed, try "latest" literal as fallback
-		pm.logger.Printf("Failed to get version %s, trying 'latest'...", version)
-		manifest, err = pm.client.GetManifest(ctx, id, "latest")
-		if err != nil {
+		if version != "latest" {
+			// If specific version failed, try to recover using "latest" ONLY IF we haven't tried it yet.
+			// Note: This often fails on winget.run but is worth a shot as last resort.
+			pm.logger.Printf("Failed to get version %s, trying 'latest'...", version)
+			manifest, err = pm.client.GetManifest(ctx, id, "latest")
+			if err != nil {
+				return fmt.Errorf("fetching manifest: %w", err)
+			}
+		} else {
 			return fmt.Errorf("fetching manifest: %w", err)
 		}
-		version = "latest"
 	}
 
 	// 3. Select Installer
@@ -134,7 +183,7 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 	pm.logger.Printf("Selected installer: %s (%s)", bestInstaller.InstallerType, bestInstaller.Architecture)
 
 	// 4. Download
-	fileName := fmt.Sprintf("%s-%s.%s", manifest.PackageName, version, determineExtension(bestInstaller))
+	fileName := fmt.Sprintf("%s-%s.%s", manifest.PackageName, manifest.PackageVersion, determineExtension(bestInstaller))
 	// Sanitize filename
 	fileName = strings.ReplaceAll(fileName, "/", "_")
 	fileName = strings.ReplaceAll(fileName, "\\", "_")
@@ -207,10 +256,26 @@ func (pm *PackageManager) GetInfo(ctx context.Context, name string) (*Manifest, 
 		return nil, fmt.Errorf("package not found")
 	}
 	
-	id := results[0].ID
+	// Better matching logic for GetInfo as well
+	var entry PackageEntry
+	found := false
+	for _, p := range results {
+		if strings.EqualFold(p.ID, name) {
+			entry = p
+			found = true
+			break
+		}
+	}
+	if !found {
+		entry = results[0]
+	}
+	
+	id := entry.ID
 	version := "latest"
-	if len(results[0].Versions) > 0 {
-		version = results[0].Versions[len(results[0].Versions)-1]
+	if len(entry.Versions) > 0 {
+		version = entry.Versions[len(entry.Versions)-1]
+	} else if entry.Latest.Version != "" {
+		version = entry.Latest.Version
 	}
 
 	return pm.client.GetManifest(ctx, id, version)
