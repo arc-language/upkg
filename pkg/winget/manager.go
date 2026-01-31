@@ -58,19 +58,12 @@ func (pm *PackageManager) Search(ctx context.Context, query string) ([]PackageEn
 
 // GetInfo retrieves package manifest details
 func (pm *PackageManager) GetInfo(ctx context.Context, name string) (*Manifest, error) {
-	// 1. Try direct lookup first (if it looks like an ID)
+	// 1. Try direct lookup first
 	if strings.Contains(name, ".") {
 		entry, err := pm.client.GetPackage(ctx, name)
 		if err == nil {
-			// Resolve version
-			version := entry.Latest.Version
-			versions := entry.GetVersions()
-			if version == "" && len(versions) > 0 {
-				version = versions[len(versions)-1]
-			}
-			if version == "" { version = "latest" }
-			
-			return pm.client.GetManifest(ctx, entry.ID, version)
+			// Try to resolve a working version
+			return pm.fetchFirstValidManifest(ctx, entry, "latest")
 		}
 	}
 
@@ -83,97 +76,65 @@ func (pm *PackageManager) GetInfo(ctx context.Context, name string) (*Manifest, 
 		return nil, fmt.Errorf("package not found")
 	}
 	
-	// Select best match
 	entry := pm.selectBestMatch(results, name)
-	
-	version := entry.Latest.Version
-	versions := entry.GetVersions()
-	if version == "" && len(versions) > 0 {
-		version = versions[len(versions)-1]
-	}
-	if version == "" { version = "latest" }
-
-	return pm.client.GetManifest(ctx, entry.ID, version)
+	return pm.fetchFirstValidManifest(ctx, entry, "latest")
 }
 
 func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) error {
 	pm.logger.Printf("Resolving package: %s", opts.Package)
 
-	id := opts.Package
-	version := opts.Version
-	
-	if version == "" || version == "latest" {
-		var entry *PackageEntry
-		var err error
+	var entry *PackageEntry
+	var err error
 
-		// Strategy A: Direct ID Lookup (Preferred)
-		if strings.Contains(opts.Package, ".") {
-			pm.logger.Printf("Attempting direct ID lookup for '%s'...", opts.Package)
-			entry, err = pm.client.GetPackage(ctx, opts.Package)
-			if err == nil {
-				pm.logger.Printf("✓ Found package via ID: %s", entry.ID)
-			} else {
-				pm.logger.Printf("Direct lookup failed: %v", err)
-			}
-		}
-
-		// Check if we need to fallback to search
-		// Fallback if: entry is nil OR entry has no version info
-		versions := []string{}
-		if entry != nil {
-			versions = entry.GetVersions()
-		}
-
-		if entry == nil || (entry.Latest.Version == "" && len(versions) == 0) {
-			pm.logger.Printf("Falling back to search for '%s'...", opts.Package)
-			
-			// 1. Try exact search
-			results, err := pm.client.Search(ctx, opts.Package)
-			
-			// 2. Try relaxed search if failed and contains dots
-			if (err != nil || len(results) == 0) && strings.Contains(opts.Package, ".") {
-				relaxed := strings.ReplaceAll(opts.Package, ".", " ")
-				pm.logger.Printf("Retrying search with relaxed query: '%s'...", relaxed)
-				results, err = pm.client.Search(ctx, relaxed)
-			}
-
-			if err != nil {
-				return fmt.Errorf("searching for package: %w", err)
-			}
-			if len(results) == 0 {
-				return fmt.Errorf("package '%s' not found", opts.Package)
-			}
-
-			entry = pm.selectBestMatch(results, opts.Package)
-			pm.logger.Printf("Selected from search: %s", entry.ID)
-		}
-
-		id = entry.ID
-		
-		// Version Resolution
-		versions = entry.GetVersions()
-		if entry.Latest.Version != "" {
-			version = entry.Latest.Version
-		} else if len(versions) > 0 {
-			version = versions[len(versions)-1]
+	// 1. Resolve Package Entry
+	// Strategy A: Direct ID Lookup
+	if strings.Contains(opts.Package, ".") {
+		pm.logger.Printf("Attempting direct ID lookup for '%s'...", opts.Package)
+		entry, err = pm.client.GetPackage(ctx, opts.Package)
+		if err == nil {
+			pm.logger.Printf("✓ Found package via ID: %s", entry.ID)
 		} else {
-			version = "latest"
-			pm.logger.Printf("Warning: Could not determine version, defaulting to 'latest'")
+			pm.logger.Printf("Direct lookup failed: %v", err)
 		}
-		pm.logger.Printf("Resolved Version: %s", version)
 	}
 
-	// 2. Get Manifest
-	manifest, err := pm.client.GetManifest(ctx, id, version)
-	if err != nil {
-		if version != "latest" {
-			pm.logger.Printf("Failed to get version %s, retrying with 'latest'...", version)
-			manifest, err = pm.client.GetManifest(ctx, id, "latest")
-			if err != nil {
-				return fmt.Errorf("fetching manifest: %w", err)
-			}
-		} else {
-			return fmt.Errorf("fetching manifest: %w", err)
+	// Strategy B: Search Fallback
+	if entry == nil {
+		pm.logger.Printf("Falling back to search for '%s'...", opts.Package)
+		results, err := pm.client.Search(ctx, opts.Package)
+		
+		if (err != nil || len(results) == 0) && strings.Contains(opts.Package, ".") {
+			relaxed := strings.ReplaceAll(opts.Package, ".", " ")
+			pm.logger.Printf("Retrying search with relaxed query: '%s'...", relaxed)
+			results, err = pm.client.Search(ctx, relaxed)
+		}
+
+		if err != nil {
+			return fmt.Errorf("search failed: %w", err)
+		}
+		if len(results) == 0 {
+			return fmt.Errorf("package '%s' not found", opts.Package)
+		}
+
+		entry = pm.selectBestMatch(results, opts.Package)
+		pm.logger.Printf("Selected from search: %s", entry.ID)
+	}
+
+	// 2. Resolve Manifest (Iterate versions if specific version not requested)
+	var manifest *Manifest
+	
+	if opts.Version != "" && opts.Version != "latest" {
+		// Specific version requested
+		pm.logger.Printf("Fetching specific version: %s", opts.Version)
+		manifest, err = pm.client.GetManifest(ctx, entry.ID, opts.Version)
+		if err != nil {
+			return fmt.Errorf("failed to fetch version %s: %w", opts.Version, err)
+		}
+	} else {
+		// Auto-detect version
+		manifest, err = pm.fetchFirstValidManifest(ctx, entry, "latest")
+		if err != nil {
+			return err
 		}
 	}
 
@@ -193,7 +154,6 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 			bestInstaller = &inst
 			break
 		}
-		// Fallback: x64 can run x86
 		if wingetArch == "x64" && strings.EqualFold(inst.Architecture, "x86") {
 			if bestInstaller == nil {
 				bestInstaller = &inst
@@ -225,7 +185,7 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 	
 	if err := pm.client.DownloadFile(ctx, bestInstaller.InstallerUrl, f); err != nil {
 		f.Close()
-		return fmt.Errorf("downloading file: %w", err)
+		return fmt.Errorf("download error: %w", err)
 	}
 	f.Close()
 
@@ -255,6 +215,8 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 		finalPath := filepath.Join(installDir, fileName)
 		input, _ := os.ReadFile(destPath)
 		os.WriteFile(finalPath, input, 0755)
+		
+		pm.logger.Printf("✓ Package installed to: %s", finalPath)
 	}
 
 	if !opts.KeepArchive {
@@ -262,6 +224,56 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 	}
 
 	return nil
+}
+
+// fetchFirstValidManifest iterates through available versions to find a working one
+func (pm *PackageManager) fetchFirstValidManifest(ctx context.Context, entry *PackageEntry, requestedVer string) (*Manifest, error) {
+	// If the user asked for a specific version that isn't "latest", we shouldn't be here (handled in Download),
+	// but for GetInfo we might need this.
+	
+	versions := []string{}
+	
+	// Priority 1: Latest.Version (if exists)
+	if entry.Latest.Version != "" {
+		versions = append(versions, entry.Latest.Version)
+	}
+	
+	// Priority 2: Versions List (Raw)
+	// The API typically returns versions descending (newest first) or ascending.
+	// We'll try them in the order provided by the API, assuming the API puts relevant ones first.
+	// If "Latest.Version" was missing, Versions[0] is our best bet.
+	apiVersions := entry.GetVersions()
+	versions = append(versions, apiVersions...)
+	
+	// Deduplicate
+	seen := map[string]bool{}
+	unique := []string{}
+	for _, v := range versions {
+		if v != "" && !seen[v] {
+			seen[v] = true
+			unique = append(unique, v)
+		}
+	}
+	
+	// Try each version
+	for _, v := range unique {
+		pm.logger.Printf("Fetching manifest for version: %s", v)
+		m, err := pm.client.GetManifest(ctx, entry.ID, v)
+		if err == nil {
+			pm.logger.Printf("✓ Successfully resolved version: %s", v)
+			return m, nil
+		}
+		pm.logger.Printf("⚠ Version %s failed: %v", v, err)
+	}
+	
+	// Final fallback: literal "latest"
+	pm.logger.Printf("Trying literal 'latest'...")
+	m, err := pm.client.GetManifest(ctx, entry.ID, "latest")
+	if err == nil {
+		return m, nil
+	}
+	
+	return nil, fmt.Errorf("unable to resolve any valid manifest for %s", entry.ID)
 }
 
 // Helpers

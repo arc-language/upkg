@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"strings"
@@ -14,7 +15,6 @@ import (
 )
 
 var envManager *env.EnvironmentManager
-var debugMode bool
 
 func main() {
 	envManager = env.NewEnvironmentManager("")
@@ -513,9 +513,7 @@ func handleEnvActivate(args []string) {
 
 	// AUTO-DEACTIVATE any existing environment first
 	if active, err := envManager.GetActiveEnv(); err == nil && active.Name != name {
-		if debugMode {
-			fmt.Printf("Debug: Deactivating current environment '%s'...\n", active.Name)
-		}
+		// Silent deactivation
 		envManager.DeactivateEnv()
 	}
 
@@ -661,6 +659,7 @@ func handleInstallCommand(args []string) {
 	config.Debug = debug // Enable debug mode
 
 	if debug {
+		config.Logger = log.New(os.Stderr, "[DEBUG] ", log.LstdFlags)
 		fmt.Println("=== DEBUG MODE ENABLED ===")
 		fmt.Printf("Install path: %s\n", config.InstallPath)
 		fmt.Printf("Cache path: %s\n", config.CachePath)
@@ -770,9 +769,26 @@ func handleShellCommand(args []string) {
 
 func handleInfoCommand(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintf(os.Stderr, "Usage: upkg info <package>\n")
+		fmt.Fprintf(os.Stderr, "Usage: upkg info <package> [--debug]\n")
 		os.Exit(1)
 	}
+    
+    // Check for debug flag
+    debug := false
+    packageName := ""
+    
+    for _, arg := range args {
+        if arg == "--debug" || arg == "-d" {
+            debug = true
+        } else {
+            packageName = arg
+        }
+    }
+    
+    if packageName == "" {
+        fmt.Fprintf(os.Stderr, "Error: Package name required\n")
+        os.Exit(1)
+    }
 
 	envSpec, err := envManager.GetActiveEnv()
 	if err != nil {
@@ -780,11 +796,14 @@ func handleInfoCommand(args []string) {
 		os.Exit(1)
 	}
 
-	packageName := args[0]
-
 	// Create manager
 	config := upkg.DefaultConfig()
 	config.InstallPath = envSpec.InstallPath
+	config.Debug = debug
+	
+	if debug {
+	    config.Logger = log.New(os.Stderr, "[DEBUG] ", log.LstdFlags)
+	}
 
 	backendType := mapBackendName(envSpec.Backend)
 	manager, err := upkg.NewManager(backendType, config)
