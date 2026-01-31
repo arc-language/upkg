@@ -1,3 +1,4 @@
+// pkg/winget/manager.go
 package winget
 
 import (
@@ -50,6 +51,51 @@ func NewPackageManager(cfg *Config) *PackageManager {
 	}
 }
 
+// Search exposes the client search functionality
+func (pm *PackageManager) Search(ctx context.Context, query string) ([]PackageEntry, error) {
+	return pm.client.Search(ctx, query)
+}
+
+// GetInfo retrieves package manifest details
+func (pm *PackageManager) GetInfo(ctx context.Context, name string) (*Manifest, error) {
+	// 1. Try direct lookup first (if it looks like an ID)
+	if strings.Contains(name, ".") {
+		entry, err := pm.client.GetPackage(ctx, name)
+		if err == nil {
+			// Resolve version
+			version := entry.Latest.Version
+			versions := entry.GetVersions()
+			if version == "" && len(versions) > 0 {
+				version = versions[len(versions)-1]
+			}
+			if version == "" { version = "latest" }
+			
+			return pm.client.GetManifest(ctx, entry.ID, version)
+		}
+	}
+
+	// 2. Fallback to Search
+	results, err := pm.client.Search(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if len(results) == 0 {
+		return nil, fmt.Errorf("package not found")
+	}
+	
+	// Select best match
+	entry := pm.selectBestMatch(results, name)
+	
+	version := entry.Latest.Version
+	versions := entry.GetVersions()
+	if version == "" && len(versions) > 0 {
+		version = versions[len(versions)-1]
+	}
+	if version == "" { version = "latest" }
+
+	return pm.client.GetManifest(ctx, entry.ID, version)
+}
+
 func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) error {
 	pm.logger.Printf("Resolving package: %s", opts.Package)
 
@@ -61,24 +107,30 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 		var err error
 
 		// Strategy A: Direct ID Lookup (Preferred)
-		// We try this first, but it is case-sensitive on the API side.
 		if strings.Contains(opts.Package, ".") {
 			pm.logger.Printf("Attempting direct ID lookup for '%s'...", opts.Package)
 			entry, err = pm.client.GetPackage(ctx, opts.Package)
 			if err == nil {
 				pm.logger.Printf("✓ Found package via ID: %s", entry.ID)
 			} else {
-				pm.logger.Printf("Direct lookup failed (likely case mismatch or not found): %v", err)
+				pm.logger.Printf("Direct lookup failed: %v", err)
 			}
 		}
 
-		// Strategy B: Search (Fallback)
-		// If direct lookup failed, we search. Search is fuzzy and case-insensitive.
-		if entry == nil {
+		// Check if we need to fallback to search
+		// Fallback if: entry is nil OR entry has no version info
+		versions := []string{}
+		if entry != nil {
+			versions = entry.GetVersions()
+		}
+
+		if entry == nil || (entry.Latest.Version == "" && len(versions) == 0) {
 			pm.logger.Printf("Falling back to search for '%s'...", opts.Package)
+			
+			// 1. Try exact search
 			results, err := pm.client.Search(ctx, opts.Package)
 			
-			// If standard search fails and ID has dots, try replacing with spaces
+			// 2. Try relaxed search if failed and contains dots
 			if (err != nil || len(results) == 0) && strings.Contains(opts.Package, ".") {
 				relaxed := strings.ReplaceAll(opts.Package, ".", " ")
 				pm.logger.Printf("Retrying search with relaxed query: '%s'...", relaxed)
@@ -86,13 +138,12 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 			}
 
 			if err != nil {
-				return fmt.Errorf("search failed: %w", err)
+				return fmt.Errorf("searching for package: %w", err)
 			}
 			if len(results) == 0 {
 				return fmt.Errorf("package '%s' not found", opts.Package)
 			}
 
-			// Select best match
 			entry = pm.selectBestMatch(results, opts.Package)
 			pm.logger.Printf("Selected from search: %s", entry.ID)
 		}
@@ -100,28 +151,33 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 		id = entry.ID
 		
 		// Version Resolution
-		versions := entry.GetVersions()
-		
+		versions = entry.GetVersions()
 		if entry.Latest.Version != "" {
 			version = entry.Latest.Version
 		} else if len(versions) > 0 {
-			// Take the last version in the list (usually the highest)
 			version = versions[len(versions)-1]
 		} else {
-			// Critical failure point: No version found.
-			// winget.run/v2/manifests/... requires a specific version. "latest" usually fails.
-			return fmt.Errorf("unable to resolve version for %s: no versions returned by API", id)
+			version = "latest"
+			pm.logger.Printf("Warning: Could not determine version, defaulting to 'latest'")
 		}
 		pm.logger.Printf("Resolved Version: %s", version)
 	}
 
-	// Get Manifest
+	// 2. Get Manifest
 	manifest, err := pm.client.GetManifest(ctx, id, version)
 	if err != nil {
-		return fmt.Errorf("fetching manifest for %s @ %s: %w", id, version, err)
+		if version != "latest" {
+			pm.logger.Printf("Failed to get version %s, retrying with 'latest'...", version)
+			manifest, err = pm.client.GetManifest(ctx, id, "latest")
+			if err != nil {
+				return fmt.Errorf("fetching manifest: %w", err)
+			}
+		} else {
+			return fmt.Errorf("fetching manifest: %w", err)
+		}
 	}
 
-	// Select Installer
+	// 3. Select Installer
 	targetArch := opts.Architecture
 	if targetArch == "" {
 		targetArch = runtime.GOARCH
@@ -137,6 +193,7 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 			bestInstaller = &inst
 			break
 		}
+		// Fallback: x64 can run x86
 		if wingetArch == "x64" && strings.EqualFold(inst.Architecture, "x86") {
 			if bestInstaller == nil {
 				bestInstaller = &inst
@@ -145,12 +202,12 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 	}
 
 	if bestInstaller == nil {
-		return fmt.Errorf("no compatible installer found for %s", wingetArch)
+		return fmt.Errorf("no compatible installer found for architecture %s", wingetArch)
 	}
 
 	pm.logger.Printf("Selected installer: %s (%s)", bestInstaller.InstallerType, bestInstaller.Architecture)
 
-	// Download
+	// 4. Download
 	ext := determineExtension(bestInstaller)
 	fileName := fmt.Sprintf("%s-%s.%s", manifest.PackageName, manifest.PackageVersion, ext)
 	fileName = sanitizeFilename(fileName)
@@ -168,11 +225,11 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 	
 	if err := pm.client.DownloadFile(ctx, bestInstaller.InstallerUrl, f); err != nil {
 		f.Close()
-		return fmt.Errorf("download error: %w", err)
+		return fmt.Errorf("downloading file: %w", err)
 	}
 	f.Close()
 
-	// Verify Hash
+	// 5. Verify Hash
 	if opts.VerifyHash && bestInstaller.InstallerSha256 != "" {
 		pm.logger.Printf("Verifying hash...")
 		if err := verifyHash(destPath, bestInstaller.InstallerSha256); err != nil {
@@ -180,14 +237,15 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 		}
 	}
 
-	// Install
+	// 6. Install
 	installDir := filepath.Join(pm.config.InstallPath, manifest.PackageIdentifier)
-	isZip := bestInstaller.InstallerType == "zip" || strings.HasSuffix(strings.ToLower(bestInstaller.InstallerUrl), ".zip")
+	
+	isZip := bestInstaller.InstallerType == InstallerTypeZip || strings.HasSuffix(strings.ToLower(bestInstaller.InstallerUrl), ".zip")
 	
 	if opts.Extract && isZip {
 		pm.logger.Printf("Extracting to %s", installDir)
 		if err := unzip(destPath, installDir); err != nil {
-			return fmt.Errorf("unzip failed: %w", err)
+			return fmt.Errorf("extracting zip: %w", err)
 		}
 	} else {
 		pm.logger.Printf("Installing to %s", installDir)
@@ -206,14 +264,18 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 	return nil
 }
 
-// ... include helpers (selectBestMatch, etc.) from previous response ...
+// Helpers
+
 func (pm *PackageManager) selectBestMatch(results []PackageEntry, query string) *PackageEntry {
+	// 1. Exact ID Match
 	for _, p := range results {
 		if strings.EqualFold(p.ID, query) { return &p }
 	}
+	// 2. Exact Name Match
 	for _, p := range results {
 		if strings.EqualFold(p.Latest.Name, query) { return &p }
 	}
+	// 3. Suffix Match
 	suffix := "." + strings.ToLower(query)
 	for _, p := range results {
 		if strings.HasSuffix(strings.ToLower(p.ID), suffix) { return &p }
@@ -221,7 +283,6 @@ func (pm *PackageManager) selectBestMatch(results []PackageEntry, query string) 
 	return &results[0]
 }
 
-// ... existing helpers (determineExtension, sanitizeFilename, verifyHash, unzip) ...
 func determineExtension(i *Installer) string {
 	u := strings.ToLower(i.InstallerUrl)
 	if strings.Contains(u, ".zip") { return "zip" }
@@ -233,7 +294,8 @@ func determineExtension(i *Installer) string {
 
 func sanitizeFilename(name string) string {
 	name = strings.ReplaceAll(name, "/", "_")
-	return strings.ReplaceAll(name, "\\", "_")
+	name = strings.ReplaceAll(name, "\\", "_")
+	return name
 }
 
 func verifyHash(path, expected string) error {
