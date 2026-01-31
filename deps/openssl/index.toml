@@ -1,13 +1,13 @@
-# deps/openssl/index.toml
-
-aliases = ["ssl", "libssl"]
+name = "openssl"
+# The linker flags needed: -lssl -lcrypto
+libs = ["ssl", "crypto"]
 
 [backends]
 apt     = "libssl-dev"
 dpkg    = "libssl-dev"
 dnf     = "openssl-devel"
 brew    = "openssl@3"
-winget  = "OpenSSL.OpenSSL"
+winget  = "ShiningLight.OpenSSL"
 pacman  = "openssl"
 apk     = "openssl-dev"
 zypper  = "libopenssl-devel"

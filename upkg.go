@@ -24,6 +24,9 @@ type (
 	Config          = backend.Config
 	NixConfig       = backend.NixConfig
 	BrewConfig      = backend.BrewConfig
+	// RegistryEntry is the metadata for a package from the deps/ registry.
+	// Re-exported so external tools like a compiler can access it.
+	RegistryEntry = registry.Entry
 )
 
 // Re-export backend constants
@@ -321,6 +324,16 @@ func (m *Manager) Search(ctx context.Context, query string) ([]*backend.PackageI
 		return nil, fmt.Errorf("search query is required")
 	}
 	return m.backend.Search(ctx, query)
+}
+
+// GetRegistryEntry retrieves the full registry entry for a package.
+// This is useful for accessing metadata like the 'libs' field.
+// Returns an error if not in auto mode or if the package is not found.
+func (m *Manager) GetRegistryEntry(name string) (*RegistryEntry, error) {
+	if m.registry == nil {
+		return nil, fmt.Errorf("registry is only available in auto mode")
+	}
+	return m.registry.Load(name)
 }
 
 // Backend returns the name of the active backend

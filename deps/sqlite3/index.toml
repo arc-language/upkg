@@ -1,6 +1,6 @@
-# deps/sqlite3/index.toml
-
-aliases = ["sqlite3"]
+name = "sqlite3"
+# The linker flag needed: -lsqlite3
+libs = ["sqlite3"]
 
 [backends]
 apt     = "libsqlite3-dev"
