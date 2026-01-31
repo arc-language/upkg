@@ -63,7 +63,6 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 		var err error
 
 		// Strategy A: Direct ID Lookup (Preferred)
-		// If input looks like an ID (Publisher.Package), try to fetch it directly.
 		if strings.Contains(opts.Package, ".") {
 			pm.logger.Printf("Attempting direct ID lookup for '%s'...", opts.Package)
 			entry, err = pm.client.GetPackage(ctx, opts.Package)
@@ -74,11 +73,27 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 			}
 		}
 
+		// Check if the entry we got has usable version info
+		versions := []string{}
+		if entry != nil {
+			versions = entry.GetVersions()
+		}
+
 		// Strategy B: Search (Fallback)
-		// If direct lookup failed or input is a keyword (no dot), perform a search.
-		if entry == nil {
-			pm.logger.Printf("Falling back to search for '%s'...", opts.Package)
+		// If direct lookup failed OR the returned entry has no version info, try search
+		if entry == nil || (entry.Latest.Version == "" && len(versions) == 0) {
+			pm.logger.Printf("Falling back to search for '%s' (reason: entry nil or no versions)...", opts.Package)
+			
+			// 1. Try exact search
 			results, err := pm.client.Search(ctx, opts.Package)
+			
+			// 2. Try fuzzy search if no results and query contains dot
+			if (err != nil || len(results) == 0) && strings.Contains(opts.Package, ".") {
+				relaxed := strings.ReplaceAll(opts.Package, ".", " ")
+				pm.logger.Printf("No results, retrying with relaxed query: '%s'...", relaxed)
+				results, err = pm.client.Search(ctx, relaxed)
+			}
+
 			if err != nil {
 				return fmt.Errorf("searching for package: %w", err)
 			}
@@ -94,13 +109,14 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 		id = entry.ID
 		
 		// Version Selection
-		// Priority: Latest.Version > Last in Versions list > "latest" literal
+		versions = entry.GetVersions() // Refresh versions from final entry
 		if entry.Latest.Version != "" {
 			version = entry.Latest.Version
-		} else if len(entry.Versions) > 0 {
-			version = entry.Versions[len(entry.Versions)-1]
+		} else if len(versions) > 0 {
+			version = versions[len(versions)-1]
 		} else {
 			version = "latest"
+			pm.logger.Printf("Warning: Could not determine version, defaulting to 'latest' (may fail)")
 		}
 		pm.logger.Printf("Resolved Version: %s", version)
 	}
@@ -223,8 +239,9 @@ func (pm *PackageManager) GetInfo(ctx context.Context, name string) (*Manifest, 
 		entry, err := pm.client.GetPackage(ctx, name)
 		if err == nil {
 			version := entry.Latest.Version
-			if version == "" && len(entry.Versions) > 0 {
-				version = entry.Versions[len(entry.Versions)-1]
+			versions := entry.GetVersions()
+			if version == "" && len(versions) > 0 {
+				version = versions[len(versions)-1]
 			}
 			if version == "" { version = "latest" }
 			return pm.client.GetManifest(ctx, entry.ID, version)
@@ -243,8 +260,9 @@ func (pm *PackageManager) GetInfo(ctx context.Context, name string) (*Manifest, 
 	entry := pm.selectBestMatch(results, name)
 	
 	version := entry.Latest.Version
-	if version == "" && len(entry.Versions) > 0 {
-		version = entry.Versions[len(entry.Versions)-1]
+	versions := entry.GetVersions()
+	if version == "" && len(versions) > 0 {
+		version = versions[len(versions)-1]
 	}
 	if version == "" { version = "latest" }
 
@@ -266,7 +284,7 @@ func (pm *PackageManager) selectBestMatch(results []PackageEntry, query string) 
 			return &p
 		}
 	}
-	// 3. Suffix Match (e.g. "wget" matches "JernejSimoncic.Wget")
+	// 3. Suffix Match
 	suffix := "." + strings.ToLower(query)
 	for _, p := range results {
 		if strings.HasSuffix(strings.ToLower(p.ID), suffix) {

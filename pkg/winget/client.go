@@ -34,8 +34,7 @@ func NewClient(timeout time.Duration, logger *log.Logger) *Client {
 
 // GetPackage fetches details for a specific package ID directly
 func (c *Client) GetPackage(ctx context.Context, id string) (*PackageEntry, error) {
-	// Winget IDs are typically Publisher.Package. The API expects /packages/Publisher/Package
-	// We split by the first dot to separate Publisher and Package Name.
+	// Winget IDs are typically Publisher.Package.
 	parts := strings.SplitN(id, ".", 2)
 	if len(parts) != 2 {
 		return nil, fmt.Errorf("invalid package ID format: %s (expected Publisher.Package)", id)
@@ -65,16 +64,29 @@ func (c *Client) GetPackage(ctx context.Context, id string) (*PackageEntry, erro
 		return nil, fmt.Errorf("API request failed with status: %d", resp.StatusCode)
 	}
 
-	// The endpoint returns { "Package": { ... } }
-	var result struct {
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+    
+    // Log the raw JSON for debugging
+    c.logger.Printf("[Winget API] Raw Response: %s", string(bodyBytes))
+
+	// Try decoding as wrapped { "Package": ... }
+	var wrapped struct {
 		Package PackageEntry `json:"Package"`
 	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decoding package response: %w", err)
+	if err := json.Unmarshal(bodyBytes, &wrapped); err == nil && wrapped.Package.ID != "" {
+		return &wrapped.Package, nil
 	}
 
-	return &result.Package, nil
+	// Try decoding as raw PackageEntry
+	var entry PackageEntry
+	if err := json.Unmarshal(bodyBytes, &entry); err == nil && entry.ID != "" {
+		return &entry, nil
+	}
+
+	return nil, fmt.Errorf("failed to decode package response")
 }
 
 // Search searches for packages by query string
@@ -147,7 +159,6 @@ func (c *Client) GetManifest(ctx context.Context, id, version string) (*Manifest
 	return &manifest, nil
 }
 
-// DownloadFile downloads a file from a URL to a writer
 func (c *Client) DownloadFile(ctx context.Context, url string, w io.Writer) error {
 	c.logger.Printf("[Winget API] Downloading File: %s", url)
 	
