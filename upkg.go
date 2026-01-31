@@ -5,11 +5,13 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 
 	"github.com/arc-language/upkg/pkg/backend"
 	"github.com/arc-language/upkg/pkg/choco"
+	"github.com/arc-language/upkg/pkg/index"
 )
 
 // Re-export backend types for convenience
@@ -34,7 +36,7 @@ const (
 	BackendChoco  = backend.BackendChoco
 	BackendPacman = backend.BackendPacman
 	BackendZypper = backend.BackendZypper
-	BackendWinget = backend.BackendWinget // Added Winget
+	BackendWinget = backend.BackendWinget
 	BackendAuto   = backend.BackendAuto
 )
 
@@ -55,6 +57,43 @@ func NewManager(backendType backend.BackendType, config *backend.Config) (*Manag
 		config = backend.DefaultConfig()
 	}
 
+	// 1. Ensure CachePath is set
+	if config.CachePath == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			// Fallback to temp dir if user home not found
+			config.CachePath = filepath.Join(os.TempDir(), "upkg")
+		} else {
+			config.CachePath = filepath.Join(home, ".cache", "upkg")
+		}
+	}
+
+	// 2. Check if we need to sync the package index.
+	// We need the index if we are explicitly using Nix/Winget, or if we are using Auto
+	// (because Auto might resolve to Nix or Winget).
+	needsIndex := backendType == backend.BackendNix ||
+		backendType == backend.BackendWinget ||
+		backendType == backend.BackendAuto
+
+	if needsIndex {
+		// Check for the existence of one of the index files (e.g., Nix index)
+		// We expect them to be at {CachePath}/index/nix_x86_64_linux.json
+		indexFile := filepath.Join(config.CachePath, "index", "nix_x86_64_linux.json")
+		
+		if _, err := os.Stat(indexFile); os.IsNotExist(err) {
+			if config.Logger != nil {
+				config.Logger.Printf("Package index missing. Syncing from repository...")
+			} else {
+				fmt.Println("Package index missing. Syncing from repository...")
+			}
+
+			if err := index.Sync(config.CachePath); err != nil {
+				return nil, fmt.Errorf("failed to sync package index: %w", err)
+			}
+		}
+	}
+
+	// 3. Initialize Backend
 	var b backend.Backend
 	var err error
 
@@ -78,7 +117,7 @@ func NewManager(backendType backend.BackendType, config *backend.Config) (*Manag
 	case backend.BackendZypper:
 		b, err = backend.NewZypperBackend(config)
 	case backend.BackendWinget:
-		b, err = backend.NewWingetBackend(config) // Added Winget constructor
+		b, err = backend.NewWingetBackend(config)
 	case backend.BackendAuto:
 		b, err = autoDetectBackend(config)
 	default:
@@ -106,9 +145,7 @@ func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
 	}
 
 	if runtime.GOOS == "windows" {
-		// Prioritize Winget on Windows (Modern Standard)
-		// Since our implementation uses the REST API, it works on any Windows machine
-		// independent of the CLI tool presence, but we prioritize it here.
+		// Prioritize Winget on Windows
 		b, err := backend.NewWingetBackend(config)
 		if err == nil {
 			return b, nil

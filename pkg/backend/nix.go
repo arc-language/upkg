@@ -24,6 +24,7 @@ func NewNixBackend(config *Config) (*NixBackend, error) {
 	nixConfig := &nix.Config{
 		CacheURL:    config.Nix.CacheURL,
 		InstallPath: config.InstallPath,
+		CachePath:   config.CachePath, // Pass the cache path for index loading
 		Timeout:     config.Timeout,
 		Debug:       config.Debug,
 		Logger:      config.Logger,
@@ -65,7 +66,7 @@ func (b *NixBackend) Download(ctx context.Context, pkg *Package, opts *DownloadO
 
 // GetInfo retrieves package information from Nix
 func (b *NixBackend) GetInfo(ctx context.Context, name string) (*PackageInfo, error) {
-	// Lookup package in the static registry
+	// Lookup package in the loaded registry
 	pkg, err := b.manager.LookupPackage(name)
 	if err != nil {
 		return nil, fmt.Errorf("looking up package: %w", err)
@@ -79,7 +80,7 @@ func (b *NixBackend) GetInfo(ctx context.Context, name string) (*PackageInfo, er
 		Version:     pkg.NameVersion,
 		Description: "", // Not available in static registry
 		Outputs:     outputs,
-		Platforms:   []string{"x86_64-linux"}, // Only supported platform
+		Platforms:   []string{"x86_64-linux"}, // Only supported platform currently
 		Backend:     "nix",
 	}, nil
 }
@@ -90,13 +91,12 @@ func (b *NixBackend) Search(ctx context.Context, query string) ([]*PackageInfo, 
 	query = strings.ToLower(query)
 	var results []*PackageInfo
 
-	// Get the package registry
-	registry := nix.GetPackageRegistry()
+	// Get the package registry from the manager instance
+	registry := b.manager.GetPackageRegistry()
 	
 	// Simple linear search through the registry
-	// For better performance, consider building an index
-	for attr, pkg := range registry {
-		if strings.Contains(strings.ToLower(attr), query) ||
+	for _, pkg := range registry {
+		if strings.Contains(strings.ToLower(pkg.Attribute), query) ||
 			strings.Contains(strings.ToLower(pkg.NameVersion), query) {
 			
 			outputs := parseStorePath(pkg.StorePath)

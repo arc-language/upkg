@@ -1,4 +1,4 @@
-// manager.go
+// pkg/nix/manager.go
 package nix
 
 import (
@@ -6,6 +6,7 @@ import (
 	"compress/bzip2"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -17,6 +18,14 @@ import (
 	"github.com/ulikunitz/xz"
 	"zombiezen.com/go/nix/nar"
 )
+
+// PackageManager handles Nix package operations
+type PackageManager struct {
+	client *Client
+	config *Config
+	logger *log.Logger
+	index  map[string]Package // In-memory package index
+}
 
 // NewPackageManager creates a new Nix package manager
 func NewPackageManager(cfg *Config) *PackageManager {
@@ -49,16 +58,46 @@ func NewPackageManager(cfg *Config) *PackageManager {
 		client: NewClientWithTimeout(cfg.Timeout),
 		config: cfg,
 		logger: logger,
+		index:  make(map[string]Package),
 	}
 
 	if cfg.Debug {
 		pm.logger.Printf("Initialized PackageManager")
 		pm.logger.Printf("  CacheURL: %s", cfg.CacheURL)
 		pm.logger.Printf("  InstallPath: %s", cfg.InstallPath)
+		pm.logger.Printf("  CachePath: %s", cfg.CachePath)
 		pm.logger.Printf("  Timeout: %s", cfg.Timeout)
 	}
 
+	// Load the index from the cache file
+	if err := pm.loadIndex(); err != nil {
+		pm.logger.Printf("Warning: Failed to load Nix index: %v", err)
+	}
+
 	return pm
+}
+
+// loadIndex loads the JSON index file from the cache directory
+func (pm *PackageManager) loadIndex() error {
+	// The index is expected to be at: {CachePath}/index/nix_x86_64_linux.json
+	indexPath := filepath.Join(pm.config.CachePath, "index", "nix_x86_64_linux.json")
+	
+	if _, err := os.Stat(indexPath); os.IsNotExist(err) {
+		return fmt.Errorf("index file does not exist at %s (try running with -backend=auto first)", indexPath)
+	}
+
+	f, err := os.Open(indexPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	if err := json.NewDecoder(f).Decode(&pm.index); err != nil {
+		return fmt.Errorf("parsing index json: %w", err)
+	}
+	
+	pm.logger.Printf("Loaded %d packages from index", len(pm.index))
+	return nil
 }
 
 // parseStorePath parses a StorePath field into a map of outputs
@@ -98,13 +137,22 @@ func parseStorePath(storePath string) map[string]string {
 	return outputs
 }
 
-// LookupPackage finds a package by attribute name
+// LookupPackage finds a package by attribute name in the loaded index
 func (pm *PackageManager) LookupPackage(attribute string) (*Package, error) {
-	pkg, ok := x86_64_linux_Packages[attribute]
+	if len(pm.index) == 0 {
+		return nil, fmt.Errorf("package index is empty or not loaded")
+	}
+
+	pkg, ok := pm.index[attribute]
 	if !ok {
 		return nil, fmt.Errorf("package '%s' not found in registry", attribute)
 	}
 	return &pkg, nil
+}
+
+// GetPackageRegistry exposes the index for search operations
+func (pm *PackageManager) GetPackageRegistry() map[string]Package {
+	return pm.index
 }
 
 // Download downloads and installs a Nix package by attribute name
@@ -451,8 +499,4 @@ func getKeys(m map[string]string) []string {
 		keys = append(keys, k)
 	}
 	return keys
-}
-
-func GetPackageRegistry() map[string]Package {
-	return x86_64_linux_Packages
 }

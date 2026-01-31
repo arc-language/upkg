@@ -1,6 +1,23 @@
 // pkg/winget/types.go
 package winget
 
+// --- Local JSON Index Structures ---
+
+// WingetDownload represents a specific installer file in the local JSON index
+type WingetDownload struct {
+	URL  string `json:"url"`
+	Arch string `json:"arch"`
+	Type string `json:"type"`
+}
+
+// WingetVersion represents a version entry in the local JSON index
+type WingetVersion struct {
+	Version   string           `json:"version"`
+	Downloads []WingetDownload `json:"downloads"`
+}
+
+// --- Remote API Structures (winget.run) ---
+
 // APIResponse represents a generic paginated response from winget.run
 type APIResponse[T any] struct {
 	Data       []T    `json:"Data"`
@@ -42,8 +59,8 @@ type VersionInfo struct {
 	Version     string   `json:"Version"`
 	Name        string   `json:"Name"`
 	Publisher   string   `json:"Publisher"`
-	Description string   `json:"Description"` // Restored
-	Homepage    string   `json:"Homepage"`    // Restored
+	Description string   `json:"Description"`
+	Homepage    string   `json:"Homepage"`
 	License     string   `json:"License"`
 	LicenseUrl  string   `json:"LicenseUrl"`
 	Tags        []string `json:"Tags"`
@@ -56,8 +73,8 @@ type Manifest struct {
 	PackageLocale     string      `json:"PackageLocale"`
 	Publisher         string      `json:"Publisher"`
 	PackageName       string      `json:"PackageName"`
-	License           string      `json:"License"`          // Restored
-	ShortDescription  string      `json:"ShortDescription"` // Restored
+	License           string      `json:"License"`
+	ShortDescription  string      `json:"ShortDescription"`
 	Installers        []Installer `json:"Installers"`
 }
 

@@ -4,8 +4,7 @@ package winget
 import (
 	"archive/zip"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -26,11 +25,15 @@ type Config struct {
 	Logger      *log.Logger
 }
 
+// IndexData represents the structure of the JSON file: Map[PackageID] -> List[Versions]
+type IndexData map[string][]WingetVersion
+
 type PackageManager struct {
 	client     *Client
 	config     *Config
 	logger     *log.Logger
 	httpClient *http.Client
+	index      IndexData // In-memory package index
 }
 
 func NewPackageManager(cfg *Config) *PackageManager {
@@ -46,14 +49,45 @@ func NewPackageManager(cfg *Config) *PackageManager {
 		logger = log.New(io.Discard, "", 0)
 	}
 
-	return &PackageManager{
+	pm := &PackageManager{
 		client: NewClient(cfg.Timeout, logger),
 		config: cfg,
 		logger: logger,
 		httpClient: &http.Client{
 			Timeout: cfg.Timeout,
 		},
+		index: make(IndexData),
 	}
+
+	// Load the index from the cache file
+	if err := pm.loadIndex(); err != nil {
+		pm.logger.Printf("Warning: Failed to load Winget index: %v", err)
+	}
+
+	return pm
+}
+
+// loadIndex loads the JSON index file from the cache directory
+func (pm *PackageManager) loadIndex() error {
+	// The index is expected to be at: {CachePath}/index/winget_default.json
+	indexPath := filepath.Join(pm.config.CachePath, "index", "winget_default.json")
+	
+	if _, err := os.Stat(indexPath); os.IsNotExist(err) {
+		return fmt.Errorf("index file does not exist at %s", indexPath)
+	}
+
+	f, err := os.Open(indexPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	if err := json.NewDecoder(f).Decode(&pm.index); err != nil {
+		return fmt.Errorf("parsing index json: %w", err)
+	}
+	
+	pm.logger.Printf("Loaded %d packages from Winget index", len(pm.index))
+	return nil
 }
 
 // Search exposes the client search functionality
@@ -85,39 +119,47 @@ func (pm *PackageManager) GetInfo(ctx context.Context, name string) (*Manifest, 
 	return pm.fetchFirstValidManifest(ctx, entry, "latest")
 }
 
-// Download downloads and installs a package using the LOCAL winget_packages.go map
+// Download downloads and installs a package using the LOCAL JSON index
 func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) error {
 	pm.logger.Printf("Looking up package in local database: %s", opts.Package)
 
-	// Look up package in local WingetPackages map
-	pkg, exists := WingetPackages[opts.Package]
+	if len(pm.index) == 0 {
+		return fmt.Errorf("winget index not loaded (check cache directory)")
+	}
+
+	// Look up package in loaded index
+	versionsRaw, exists := pm.index[opts.Package]
 	if !exists {
 		return fmt.Errorf("package %s not found in local database", opts.Package)
 	}
 
-	pm.logger.Printf("✓ Found package: %s with %d versions", pkg.ID, len(pkg.Versions))
+	pm.logger.Printf("✓ Found package: %s with %d versions", opts.Package, len(versionsRaw))
 
 	// Find the requested version
-	var targetVersion *WingetVersion
+	var targetDownloads []WingetDownload
+	var targetVerStr string
+
 	if opts.Version != "" && opts.Version != "latest" {
-		for i := range pkg.Versions {
-			if pkg.Versions[i].Version == opts.Version {
-				targetVersion = &pkg.Versions[i]
+		for _, v := range versionsRaw {
+			if v.Version == opts.Version {
+				targetDownloads = v.Downloads
+				targetVerStr = v.Version
 				break
 			}
 		}
-		if targetVersion == nil {
+		if targetDownloads == nil {
 			return fmt.Errorf("version %s not found for package %s", opts.Version, opts.Package)
 		}
 	} else {
-		// Use the first version (assumed to be latest)
-		if len(pkg.Versions) == 0 {
+		// Use the first version (assumed to be latest/first in list coming from Python script)
+		if len(versionsRaw) == 0 {
 			return fmt.Errorf("no versions available for package %s", opts.Package)
 		}
-		targetVersion = &pkg.Versions[0]
+		targetDownloads = versionsRaw[0].Downloads
+		targetVerStr = versionsRaw[0].Version
 	}
 
-	pm.logger.Printf("Using version: %s", targetVersion.Version)
+	pm.logger.Printf("Using version: %s", targetVerStr)
 
 	// Determine architecture
 	arch := opts.Architecture
@@ -132,8 +174,8 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 
 	// Find matching download
 	var download *WingetDownload
-	for i := range targetVersion.Downloads {
-		dl := &targetVersion.Downloads[i]
+	for i := range targetDownloads {
+		dl := &targetDownloads[i]
 		pm.logger.Printf("Available download: Arch=%s, Type=%s, URL=%s", dl.Arch, dl.Type, dl.URL)
 		
 		if strings.EqualFold(dl.Arch, arch) {
@@ -145,8 +187,8 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 	// If no exact match, try fallbacks
 	if download == nil {
 		pm.logger.Printf("No exact architecture match, looking for alternatives...")
-		for i := range targetVersion.Downloads {
-			dl := &targetVersion.Downloads[i]
+		for i := range targetDownloads {
+			dl := &targetDownloads[i]
 			// For x64 systems, try x86 as fallback
 			if arch == "x64" && strings.EqualFold(dl.Arch, "x86") {
 				download = dl
@@ -156,9 +198,9 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 		}
 	}
 
-	// Last resort: use first available
-	if download == nil && len(targetVersion.Downloads) > 0 {
-		download = &targetVersion.Downloads[0]
+	// Last resort: use first available if list exists
+	if download == nil && len(targetDownloads) > 0 {
+		download = &targetDownloads[0]
 		pm.logger.Printf("Using first available download: %s", download.Arch)
 	}
 
@@ -179,7 +221,7 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 
 	// Determine file extension and name
 	ext := determineExtensionFromURL(download.URL, download.Type)
-	fileName := fmt.Sprintf("%s-%s.%s", sanitizeFilename(pkg.ID), targetVersion.Version, ext)
+	fileName := fmt.Sprintf("%s-%s.%s", sanitizeFilename(opts.Package), targetVerStr, ext)
 	
 	cachePath := filepath.Join(pm.config.CachePath, "downloads", fileName)
 	if err := os.MkdirAll(filepath.Dir(cachePath), 0755); err != nil {
@@ -196,7 +238,7 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 	pm.logger.Printf("✓ Download completed: %s", cachePath)
 
 	// Handle extraction based on installer type
-	installDir := filepath.Join(pm.config.InstallPath, pkg.ID)
+	installDir := filepath.Join(pm.config.InstallPath, opts.Package)
 	
 	isZip := strings.EqualFold(download.Type, "zip") || strings.HasSuffix(strings.ToLower(download.URL), ".zip")
 	
@@ -374,22 +416,6 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return os.WriteFile(dst, input, 0755)
-}
-
-func verifyHash(path, expected string) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return err
-	}
-	if !strings.EqualFold(hex.EncodeToString(h.Sum(nil)), expected) {
-		return fmt.Errorf("checksum mismatch")
-	}
-	return nil
 }
 
 func unzip(src, dest string) error {
