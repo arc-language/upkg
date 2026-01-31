@@ -379,3 +379,17 @@ func (pm *PackageManager) SearchPackages(ctx context.Context, query string) ([]*
 	}
 	return results, nil
 }
+
+// GetDependencies returns the list of dependencies for a package
+func (pm *PackageManager) GetDependencies(ctx context.Context, name string) ([]Dependency, error) {
+	if err := pm.updateDB(ctx, DefaultArch); err != nil {
+		return nil, err
+	}
+
+	pkg, err := pm.findPackage(name, "")
+	if err != nil {
+		return nil, err
+	}
+
+	return pkg.Dependencies, nil
+}

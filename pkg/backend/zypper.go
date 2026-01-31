@@ -71,6 +71,21 @@ func (b *ZypperBackend) GetInfo(ctx context.Context, name string) (*PackageInfo,
 	}, nil
 }
 
+func (b *ZypperBackend) GetDependencies(ctx context.Context, name string) ([]string, error) {
+	deps, err := b.manager.GetDependencies(ctx, name)
+	if err != nil {
+		return nil, fmt.Errorf("getting dependencies: %w", err)
+	}
+
+	// Convert zypper.Dependency to []string (just package names)
+	var depNames []string
+	for _, dep := range deps {
+		depNames = append(depNames, dep.Name)
+	}
+
+	return depNames, nil
+}
+
 func (b *ZypperBackend) Search(ctx context.Context, query string) ([]*PackageInfo, error) {
 	packages, err := b.manager.SearchPackages(ctx, query)
 	if err != nil {

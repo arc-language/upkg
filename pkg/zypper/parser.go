@@ -81,6 +81,33 @@ func ParsePrimary(r io.Reader, filename string, repoName string) ([]*PackageInfo
 					fullVersion += "-" + p.Version.Rel
 				}
 
+				// Parse dependencies from rpm:requires
+				var deps []Dependency
+				for _, entry := range p.Format.Requires.Entries {
+					// Skip library dependencies (they usually start with lib or contain .so)
+					// We only want package-level dependencies
+					if strings.Contains(entry.Name, ".so") || strings.HasPrefix(entry.Name, "/") {
+						continue
+					}
+
+					dep := Dependency{
+						Name:  entry.Name,
+						Flags: entry.Flags,
+						Epoch: entry.Epoch,
+					}
+
+					// Construct version string if present
+					if entry.Ver != "" {
+						dep.Version = entry.Ver
+						if entry.Rel != "" {
+							dep.Version += "-" + entry.Rel
+							dep.Rel = entry.Rel
+						}
+					}
+
+					deps = append(deps, dep)
+				}
+
 				info := &PackageInfo{
 					Name:          p.Name,
 					Version:       fullVersion,
@@ -96,6 +123,7 @@ func ParsePrimary(r io.Reader, filename string, repoName string) ([]*PackageInfo
 					Checksum:      p.Checksum.Value,
 					ChecksumType:  p.Checksum.Type,
 					Repository:    repoName,
+					Dependencies:  deps,
 				}
 				packages = append(packages, info)
 			}

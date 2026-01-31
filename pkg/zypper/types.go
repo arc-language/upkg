@@ -42,6 +42,16 @@ type PackageInfo struct {
 	Checksum      string // SHA checksum
 	ChecksumType  string // sha256, sha1, etc.
 	Repository    string // Origin repository
+	Dependencies  []Dependency // Package dependencies (added for sub-dep support)
+}
+
+// Dependency represents a package dependency
+type Dependency struct {
+	Name    string
+	Version string // Optional version constraint
+	Flags   string // EQ, GE, LE, GT, LT
+	Epoch   string
+	Rel     string
 }
 
 // DownloadOptions configures package download
@@ -88,19 +98,19 @@ type RepomdChecksum struct {
 // PrimaryMetadata represents the structure of primary.xml
 // Note: We stream parse this, so this struct is for inner elements
 type PrimaryPackage struct {
-	Type          string      `xml:"type,attr"`
-	Name          string      `xml:"name"`
-	Arch          string      `xml:"arch"`
-	Version       VersionInfo `xml:"version"`
-	Checksum      Checksum    `xml:"checksum"`
-	Summary       string      `xml:"summary"`
-	Description   string      `xml:"description"`
-	Packager      string      `xml:"packager"`
-	Url           string      `xml:"url"`
-	Time          TimeInfo    `xml:"time"`
-	Size          SizeInfo    `xml:"size"`
-	Location      Location    `xml:"location"`
-	Format        Format      `xml:"format"`
+	Type        string      `xml:"type,attr"`
+	Name        string      `xml:"name"`
+	Arch        string      `xml:"arch"`
+	Version     VersionInfo `xml:"version"`
+	Checksum    Checksum    `xml:"checksum"`
+	Summary     string      `xml:"summary"`
+	Description string      `xml:"description"`
+	Packager    string      `xml:"packager"`
+	Url         string      `xml:"url"`
+	Time        TimeInfo    `xml:"time"`
+	Size        SizeInfo    `xml:"size"`
+	Location    Location    `xml:"location"`
+	Format      Format      `xml:"format"`
 }
 
 type VersionInfo struct {
@@ -130,5 +140,26 @@ type Location struct {
 }
 
 type Format struct {
-	License string `xml:"license"`
+	License  string       `xml:"license"`
+	Requires RpmRequires  `xml:"requires"`
+	Provides RpmProvides  `xml:"provides"`
+}
+
+// RpmRequires contains the list of package dependencies
+type RpmRequires struct {
+	Entries []RpmEntry `xml:"entry"`
+}
+
+// RpmProvides contains the list of capabilities this package provides
+type RpmProvides struct {
+	Entries []RpmEntry `xml:"entry"`
+}
+
+// RpmEntry represents a single dependency or provide entry
+type RpmEntry struct {
+	Name  string `xml:"name,attr"`
+	Flags string `xml:"flags,attr,omitempty"` // EQ, GE, LE, GT, LT
+	Epoch string `xml:"epoch,attr,omitempty"`
+	Ver   string `xml:"ver,attr,omitempty"`
+	Rel   string `xml:"rel,attr,omitempty"`
 }
