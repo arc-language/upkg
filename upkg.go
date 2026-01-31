@@ -12,6 +12,7 @@ import (
 	"github.com/arc-language/upkg/pkg/backend"
 	"github.com/arc-language/upkg/pkg/choco"
 	"github.com/arc-language/upkg/pkg/index"
+	"github.com/arc-language/upkg/pkg/registry"
 )
 
 // Re-export backend types for convenience
@@ -47,8 +48,9 @@ func DefaultConfig() *Config {
 
 // Manager is the universal package manager
 type Manager struct {
-	backend backend.Backend
-	config  *backend.Config
+	backend  backend.Backend
+	config   *backend.Config
+	registry *registry.Registry // only set in auto mode
 }
 
 // NewManager creates a new universal package manager with the specified backend
@@ -57,44 +59,26 @@ func NewManager(backendType backend.BackendType, config *backend.Config) (*Manag
 		config = backend.DefaultConfig()
 	}
 
-	// 1. Ensure CachePath is set
+	// Ensure CachePath is set
 	if config.CachePath == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			// Fallback to temp dir if user home not found
 			config.CachePath = filepath.Join(os.TempDir(), "upkg")
 		} else {
 			config.CachePath = filepath.Join(home, ".cache", "upkg")
 		}
 	}
 
-	// 2. Check if we need to sync the package index.
-	// We need the index if we are explicitly using Nix/Winget, or if we are using Auto
-	// (because Auto might resolve to Nix or Winget).
-	needsIndex := backendType == backend.BackendNix ||
-		backendType == backend.BackendWinget ||
-		backendType == backend.BackendAuto
-
-	if needsIndex {
-		// Check for the existence of one of the index files (e.g., Nix index)
-		// We expect them to be at {CachePath}/index/nix_x86_64_linux.json
-		indexFile := filepath.Join(config.CachePath, "index", "nix_x86_64_linux.json")
-		
-		if _, err := os.Stat(indexFile); os.IsNotExist(err) {
-			if config.Logger != nil {
-				config.Logger.Printf("Package index missing. Syncing from repository...")
-			} else {
-				fmt.Println("Package index missing. Syncing from repository...")
-			}
-
-			if err := index.Sync(config.CachePath); err != nil {
-				return nil, fmt.Errorf("failed to sync package index: %w", err)
-			}
+	// Sync if deps folder doesn't exist yet
+	depsDir := filepath.Join(config.CachePath, "deps")
+	if _, err := os.Stat(depsDir); os.IsNotExist(err) {
+		if err := index.Sync(config.CachePath); err != nil {
+			return nil, fmt.Errorf("failed to sync package index: %w", err)
 		}
 	}
 
-	// 3. Initialize Backend
 	var b backend.Backend
+	var reg *registry.Registry
 	var err error
 
 	switch backendType {
@@ -120,6 +104,9 @@ func NewManager(backendType backend.BackendType, config *backend.Config) (*Manag
 		b, err = backend.NewWingetBackend(config)
 	case backend.BackendAuto:
 		b, err = autoDetectBackend(config)
+		if err == nil {
+			reg = registry.New(config.CachePath)
+		}
 	default:
 		return nil, fmt.Errorf("unsupported backend type: %s", backendType)
 	}
@@ -129,14 +116,14 @@ func NewManager(backendType backend.BackendType, config *backend.Config) (*Manag
 	}
 
 	return &Manager{
-		backend: b,
-		config:  config,
+		backend:  b,
+		config:   config,
+		registry: reg,
 	}, nil
 }
 
 // autoDetectBackend detects the best backend for the current system
 func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
-	// Check if Homebrew is available (macOS or Linux with Homebrew)
 	if runtime.GOOS == "darwin" {
 		b, err := backend.NewBrewBackend(config)
 		if err == nil {
@@ -145,13 +132,11 @@ func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
 	}
 
 	if runtime.GOOS == "windows" {
-		// Prioritize Winget on Windows
 		b, err := backend.NewWingetBackend(config)
 		if err == nil {
 			return b, nil
 		}
 
-		// Fallback to Chocolatey
 		if err := choco.DetectPlatform(); err == nil {
 			b, err := backend.NewChocoBackend(config)
 			if err == nil {
@@ -161,7 +146,6 @@ func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
 	}
 
 	if runtime.GOOS == "linux" {
-		// Check if this is Alpine
 		if isAlpine() {
 			b, err := backend.NewApkBackend(config)
 			if err == nil {
@@ -169,7 +153,6 @@ func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
 			}
 		}
 
-		// Check if this is Fedora/RHEL
 		if isFedora() {
 			b, err := backend.NewDnfBackend(config)
 			if err == nil {
@@ -177,7 +160,6 @@ func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
 			}
 		}
 
-		// Check if this is Arch Linux
 		if isArchLinux() {
 			b, err := backend.NewPacmanBackend(config)
 			if err == nil {
@@ -185,7 +167,6 @@ func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
 			}
 		}
 
-		// Check if this is OpenSUSE
 		if isOpenSUSE() {
 			b, err := backend.NewZypperBackend(config)
 			if err == nil {
@@ -193,7 +174,6 @@ func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
 			}
 		}
 
-		// Check if this is Ubuntu
 		if isUbuntu() {
 			b, err := backend.NewAptBackend(config)
 			if err == nil {
@@ -201,20 +181,17 @@ func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
 			}
 		}
 
-		// Try dpkg for Debian
 		b, err := backend.NewDpkgBackend(config)
 		if err == nil {
 			return b, nil
 		}
 	}
 
-	// Try Nix as fallback (works on Linux and macOS)
 	b, err := backend.NewNixBackend(config)
 	if err == nil {
 		return b, nil
 	}
 
-	// If on Linux, try Homebrew as last resort
 	if runtime.GOOS == "linux" {
 		b, err := backend.NewBrewBackend(config)
 		if err == nil {
@@ -225,11 +202,9 @@ func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
 	return nil, fmt.Errorf("no suitable package manager backend found")
 }
 
-// isFedora checks if the system is Fedora
 func isFedora() bool {
 	data, err := os.ReadFile("/etc/os-release")
 	if err != nil {
-		// Also check for /etc/fedora-release
 		if _, err := os.Stat("/etc/fedora-release"); err == nil {
 			return true
 		}
@@ -239,11 +214,9 @@ func isFedora() bool {
 	return strings.Contains(content, "fedora") || strings.Contains(content, "rhel") || strings.Contains(content, "centos")
 }
 
-// isAlpine checks if the system is Alpine Linux
 func isAlpine() bool {
 	data, err := os.ReadFile("/etc/os-release")
 	if err != nil {
-		// Also check for /etc/alpine-release
 		if _, err := os.Stat("/etc/alpine-release"); err == nil {
 			return true
 		}
@@ -253,28 +226,22 @@ func isAlpine() bool {
 	return strings.Contains(content, "alpine")
 }
 
-// isArchLinux checks if the system is Arch Linux
 func isArchLinux() bool {
-	// Check for /etc/arch-release
 	if _, err := os.Stat("/etc/arch-release"); err == nil {
 		return true
 	}
 
-	// Check os-release
 	data, err := os.ReadFile("/etc/os-release")
 	if err != nil {
 		return false
 	}
 	content := strings.ToLower(string(data))
-	// Covers Arch, Manjaro, EndeavourOS, etc.
 	return strings.Contains(content, "arch") || strings.Contains(content, "manjaro")
 }
 
-// isOpenSUSE checks if the system is OpenSUSE
 func isOpenSUSE() bool {
 	data, err := os.ReadFile("/etc/os-release")
 	if err != nil {
-		// Also check for /etc/SuSE-release
 		if _, err := os.Stat("/etc/SuSE-release"); err == nil {
 			return true
 		}
@@ -284,7 +251,6 @@ func isOpenSUSE() bool {
 	return strings.Contains(content, "opensuse") || strings.Contains(content, "sles")
 }
 
-// isUbuntu checks if the system is Ubuntu
 func isUbuntu() bool {
 	data, err := os.ReadFile("/etc/os-release")
 	if err != nil {
@@ -307,7 +273,6 @@ func (m *Manager) Download(ctx context.Context, pkg *backend.Package, opts *back
 		opts = &backend.DownloadOptions{}
 	}
 
-	// Set defaults
 	if opts.Extract == nil {
 		extract := true
 		opts.Extract = &extract
@@ -317,7 +282,20 @@ func (m *Manager) Download(ctx context.Context, pkg *backend.Package, opts *back
 		opts.VerifyHash = &verify
 	}
 
-	return m.backend.Download(ctx, pkg, opts)
+	// In auto mode, resolve through registry before delegating
+	resolvedPkg := *pkg
+	if m.registry != nil {
+		resolved, err := m.registry.Resolve(pkg.Name, m.backend.Name())
+		if err != nil {
+			return fmt.Errorf("%w", err)
+		}
+		if m.config.Debug && m.config.Logger != nil {
+			m.config.Logger.Printf("Resolved '%s' -> '%s' (%s)", pkg.Name, resolved, m.backend.Name())
+		}
+		resolvedPkg.Name = resolved
+	}
+
+	return m.backend.Download(ctx, &resolvedPkg, opts)
 }
 
 // GetInfo retrieves information about a package
@@ -325,7 +303,16 @@ func (m *Manager) GetInfo(ctx context.Context, name string) (*backend.PackageInf
 	if name == "" {
 		return nil, fmt.Errorf("package name is required")
 	}
-	return m.backend.GetInfo(ctx, name)
+
+	// In auto mode, try registry first, fall back to raw name
+	resolved := name
+	if m.registry != nil {
+		if r, err := m.registry.Resolve(name, m.backend.Name()); err == nil {
+			resolved = r
+		}
+	}
+
+	return m.backend.GetInfo(ctx, resolved)
 }
 
 // Search searches for packages by name or keyword

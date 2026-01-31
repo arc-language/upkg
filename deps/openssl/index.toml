@@ -1,0 +1,15 @@
+# deps/openssl/index.toml
+
+aliases = ["ssl", "libssl"]
+
+[backends]
+apt     = "libssl-dev"
+dpkg    = "libssl-dev"
+dnf     = "openssl-devel"
+brew    = "openssl@3"
+winget  = "OpenSSL.OpenSSL"
+pacman  = "openssl"
+apk     = "openssl-dev"
+zypper  = "libopenssl-devel"
+choco   = "openssl"
+nix     = "openssl"

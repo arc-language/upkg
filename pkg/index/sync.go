@@ -11,29 +11,20 @@ import (
 )
 
 const (
-	RepoURL = "https://github.com/arc-language/upkg"
-	RepoBranch = "main" // or master
+	RepoURL    = "https://github.com/arc-language/upkg"
+	RepoBranch = "main"
 )
 
-// Sync ensures the package index JSONs are present in the cache
+// Sync clones the repo and copies the 3 things we need into the cache
 func Sync(cacheDir string) error {
-	indexDir := filepath.Join(cacheDir, "index")
-	
-	// Create index directory if not exists
-	if err := os.MkdirAll(indexDir, 0755); err != nil {
-		return fmt.Errorf("creating index directory: %w", err)
-	}
-
-	// Create a temp directory for cloning
 	tempDir, err := os.MkdirTemp("", "upkg-clone-*")
 	if err != nil {
 		return fmt.Errorf("creating temp dir: %w", err)
 	}
-	defer os.RemoveAll(tempDir) // Cleanup repo after we are done
+	defer os.RemoveAll(tempDir)
 
 	fmt.Printf("Updating package index from %s...\n", RepoURL)
 
-	// Clone the repository (depth 1 for speed)
 	_, err = git.PlainClone(tempDir, false, &git.CloneOptions{
 		URL:           RepoURL,
 		ReferenceName: plumbing.NewBranchReferenceName(RepoBranch),
@@ -45,21 +36,31 @@ func Sync(cacheDir string) error {
 		return fmt.Errorf("git clone failed: %w", err)
 	}
 
-	// Copy specific JSON files to cache
-	// 1. Nix: packages/nix/x86_64_linux.json -> cache/index/nix_x86_64_linux.json
+	indexDir := filepath.Join(cacheDir, "index")
+	os.MkdirAll(indexDir, 0755)
+
+	// 1. Nix index
 	if err := copyFile(
 		filepath.Join(tempDir, "packages", "nix", "x86_64_linux.json"),
 		filepath.Join(indexDir, "nix_x86_64_linux.json"),
 	); err != nil {
-		fmt.Printf("Warning: Failed to copy nix index: %v\n", err)
+		fmt.Printf("Warning: nix index: %v\n", err)
 	}
 
-	// 2. Winget: packages/winget/default.json -> cache/index/winget_default.json
+	// 2. Winget index
 	if err := copyFile(
 		filepath.Join(tempDir, "packages", "winget", "default.json"),
 		filepath.Join(indexDir, "winget_default.json"),
 	); err != nil {
-		fmt.Printf("Warning: Failed to copy winget index: %v\n", err)
+		fmt.Printf("Warning: winget index: %v\n", err)
+	}
+
+	// 3. deps/ registry
+	if err := copyDir(
+		filepath.Join(tempDir, "deps"),
+		filepath.Join(cacheDir, "deps"),
+	); err != nil {
+		fmt.Printf("Warning: deps registry: %v\n", err)
 	}
 
 	fmt.Println("Package index updated successfully.")
@@ -67,18 +68,44 @@ func Sync(cacheDir string) error {
 }
 
 func copyFile(src, dst string) error {
-	sourceFile, err := os.Open(src)
+	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	defer sourceFile.Close()
+	defer in.Close()
 
-	destFile, err := os.Create(dst)
+	out, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
-	defer destFile.Close()
+	defer out.Close()
 
-	_, err = io.Copy(destFile, sourceFile)
+	_, err = io.Copy(out, in)
 	return err
+}
+
+func copyDir(src, dst string) error {
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+
+	os.MkdirAll(dst, 0755)
+
+	for _, entry := range entries {
+		srcPath := filepath.Join(src, entry.Name())
+		dstPath := filepath.Join(dst, entry.Name())
+
+		if entry.IsDir() {
+			if err := copyDir(srcPath, dstPath); err != nil {
+				return err
+			}
+		} else {
+			if err := copyFile(srcPath, dstPath); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }

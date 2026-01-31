@@ -1,0 +1,15 @@
+# deps/sqlite3/index.toml
+
+aliases = ["sqlite"]
+
+[backends]
+apt     = "libsqlite3-dev"
+dpkg    = "libsqlite3-dev"
+dnf     = "sqlite-devel"
+brew    = "sqlite"
+winget  = "SQLite.SQLite"
+pacman  = "sqlite"
+apk     = "sqlite-dev"
+zypper  = "sqlite3-devel"
+choco   = "sqlite3"
+nix     = "sqlite3"
