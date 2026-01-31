@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -26,9 +27,10 @@ type Config struct {
 }
 
 type PackageManager struct {
-	client *Client
-	config *Config
-	logger *log.Logger
+	client     *Client
+	config     *Config
+	logger     *log.Logger
+	httpClient *http.Client
 }
 
 func NewPackageManager(cfg *Config) *PackageManager {
@@ -48,6 +50,9 @@ func NewPackageManager(cfg *Config) *PackageManager {
 		client: NewClient(cfg.Timeout, logger),
 		config: cfg,
 		logger: logger,
+		httpClient: &http.Client{
+			Timeout: cfg.Timeout,
+		},
 	}
 }
 
@@ -56,7 +61,7 @@ func (pm *PackageManager) Search(ctx context.Context, query string) ([]PackageEn
 	return pm.client.Search(ctx, query)
 }
 
-// GetInfo retrieves package manifest details
+// GetInfo retrieves package manifest details from API
 func (pm *PackageManager) GetInfo(ctx context.Context, name string) (*Manifest, error) {
 	// 1. Try direct lookup first
 	if strings.Contains(name, ".") {
@@ -80,157 +85,185 @@ func (pm *PackageManager) GetInfo(ctx context.Context, name string) (*Manifest, 
 	return pm.fetchFirstValidManifest(ctx, entry, "latest")
 }
 
+// Download downloads and installs a package using the LOCAL winget_packages.go map
 func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) error {
-	pm.logger.Printf("Resolving package: %s", opts.Package)
+	pm.logger.Printf("Looking up package in local database: %s", opts.Package)
 
-	var entry *PackageEntry
-	var err error
-
-	// 1. Resolve Package Entry
-	// Strategy A: Direct ID Lookup
-	if strings.Contains(opts.Package, ".") {
-		pm.logger.Printf("Attempting direct ID lookup for '%s'...", opts.Package)
-		entry, err = pm.client.GetPackage(ctx, opts.Package)
-		if err == nil {
-			pm.logger.Printf("✓ Found package via ID: %s", entry.ID)
-		} else {
-			pm.logger.Printf("Direct lookup failed: %v", err)
-		}
+	// Look up package in local WingetPackages map
+	pkg, exists := WingetPackages[opts.Package]
+	if !exists {
+		return fmt.Errorf("package %s not found in local database", opts.Package)
 	}
 
-	// Strategy B: Search Fallback
-	if entry == nil {
-		pm.logger.Printf("Falling back to search for '%s'...", opts.Package)
-		results, err := pm.client.Search(ctx, opts.Package)
-		
-		if (err != nil || len(results) == 0) && strings.Contains(opts.Package, ".") {
-			relaxed := strings.ReplaceAll(opts.Package, ".", " ")
-			pm.logger.Printf("Retrying search with relaxed query: '%s'...", relaxed)
-			results, err = pm.client.Search(ctx, relaxed)
-		}
+	pm.logger.Printf("✓ Found package: %s with %d versions", pkg.ID, len(pkg.Versions))
 
-		if err != nil {
-			return fmt.Errorf("search failed: %w", err)
-		}
-		if len(results) == 0 {
-			return fmt.Errorf("package '%s' not found", opts.Package)
-		}
-
-		entry = pm.selectBestMatch(results, opts.Package)
-		pm.logger.Printf("Selected from search: %s", entry.ID)
-	}
-
-	// 2. Resolve Manifest (Iterate versions if specific version not requested)
-	var manifest *Manifest
-	
+	// Find the requested version
+	var targetVersion *WingetVersion
 	if opts.Version != "" && opts.Version != "latest" {
-		// Specific version requested
-		pm.logger.Printf("Fetching specific version: %s", opts.Version)
-		manifest, err = pm.client.GetManifest(ctx, entry.ID, opts.Version)
-		if err != nil {
-			return fmt.Errorf("failed to fetch version %s: %w", opts.Version, err)
+		for i := range pkg.Versions {
+			if pkg.Versions[i].Version == opts.Version {
+				targetVersion = &pkg.Versions[i]
+				break
+			}
+		}
+		if targetVersion == nil {
+			return fmt.Errorf("version %s not found for package %s", opts.Version, opts.Package)
 		}
 	} else {
-		// Auto-detect version
-		manifest, err = pm.fetchFirstValidManifest(ctx, entry, "latest")
-		if err != nil {
-			return err
+		// Use the first version (assumed to be latest)
+		if len(pkg.Versions) == 0 {
+			return fmt.Errorf("no versions available for package %s", opts.Package)
+		}
+		targetVersion = &pkg.Versions[0]
+	}
+
+	pm.logger.Printf("Using version: %s", targetVersion.Version)
+
+	// Determine architecture
+	arch := opts.Architecture
+	if arch == "" {
+		arch = runtime.GOARCH
+		if mapped, ok := SupportedArchitectures[arch]; ok {
+			arch = mapped
 		}
 	}
 
-	// 3. Select Installer
-	targetArch := opts.Architecture
-	if targetArch == "" {
-		targetArch = runtime.GOARCH
-	}
-	wingetArch, ok := SupportedArchitectures[targetArch]
-	if !ok {
-		wingetArch = targetArch 
-	}
+	pm.logger.Printf("Target architecture: %s", arch)
 
-	var bestInstaller *Installer
-	for _, inst := range manifest.Installers {
-		if strings.EqualFold(inst.Architecture, wingetArch) {
-			bestInstaller = &inst
+	// Find matching download
+	var download *WingetDownload
+	for i := range targetVersion.Downloads {
+		dl := &targetVersion.Downloads[i]
+		pm.logger.Printf("Available download: Arch=%s, Type=%s, URL=%s", dl.Arch, dl.Type, dl.URL)
+		
+		if strings.EqualFold(dl.Arch, arch) {
+			download = dl
 			break
 		}
-		if wingetArch == "x64" && strings.EqualFold(inst.Architecture, "x86") {
-			if bestInstaller == nil {
-				bestInstaller = &inst
+	}
+
+	// If no exact match, try fallbacks
+	if download == nil {
+		pm.logger.Printf("No exact architecture match, looking for alternatives...")
+		for i := range targetVersion.Downloads {
+			dl := &targetVersion.Downloads[i]
+			// For x64 systems, try x86 as fallback
+			if arch == "x64" && strings.EqualFold(dl.Arch, "x86") {
+				download = dl
+				pm.logger.Printf("Using x86 build as fallback")
+				break
 			}
 		}
 	}
 
-	if bestInstaller == nil {
-		return fmt.Errorf("no compatible installer found for architecture %s", wingetArch)
+	// Last resort: use first available
+	if download == nil && len(targetVersion.Downloads) > 0 {
+		download = &targetVersion.Downloads[0]
+		pm.logger.Printf("Using first available download: %s", download.Arch)
 	}
 
-	pm.logger.Printf("Selected installer: %s (%s)", bestInstaller.InstallerType, bestInstaller.Architecture)
+	if download == nil {
+		return fmt.Errorf("no suitable installer found for architecture: %s", arch)
+	}
 
-	// 4. Download
-	ext := determineExtension(bestInstaller)
-	fileName := fmt.Sprintf("%s-%s.%s", manifest.PackageName, manifest.PackageVersion, ext)
-	fileName = sanitizeFilename(fileName)
+	pm.logger.Printf("Selected installer: %s (%s)", download.Type, download.Arch)
+	pm.logger.Printf("Download URL: %s", download.URL)
+
+	// Ensure directories exist
+	if err := os.MkdirAll(pm.config.InstallPath, 0755); err != nil {
+		return fmt.Errorf("creating install directory: %w", err)
+	}
+	if err := os.MkdirAll(pm.config.CachePath, 0755); err != nil {
+		return fmt.Errorf("creating cache directory: %w", err)
+	}
+
+	// Determine file extension and name
+	ext := determineExtensionFromURL(download.URL, download.Type)
+	fileName := fmt.Sprintf("%s-%s.%s", sanitizeFilename(pkg.ID), targetVersion.Version, ext)
 	
-	destPath := filepath.Join(pm.config.CachePath, "downloads", fileName)
-	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
-		return err
+	cachePath := filepath.Join(pm.config.CachePath, "downloads", fileName)
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0755); err != nil {
+		return fmt.Errorf("creating cache directory: %w", err)
 	}
 
-	pm.logger.Printf("Downloading: %s", bestInstaller.InstallerUrl)
-	f, err := os.Create(destPath)
-	if err != nil {
-		return err
+	pm.logger.Printf("Downloading to: %s", cachePath)
+
+	// Download the file
+	if err := pm.downloadFile(ctx, download.URL, cachePath); err != nil {
+		return fmt.Errorf("downloading package: %w", err)
 	}
+
+	pm.logger.Printf("✓ Download completed: %s", cachePath)
+
+	// Handle extraction based on installer type
+	installDir := filepath.Join(pm.config.InstallPath, pkg.ID)
 	
-	if err := pm.client.DownloadFile(ctx, bestInstaller.InstallerUrl, f); err != nil {
-		f.Close()
-		return fmt.Errorf("download error: %w", err)
-	}
-	f.Close()
-
-	// 5. Verify Hash
-	if opts.VerifyHash && bestInstaller.InstallerSha256 != "" {
-		pm.logger.Printf("Verifying hash...")
-		if err := verifyHash(destPath, bestInstaller.InstallerSha256); err != nil {
-			return err
-		}
-	}
-
-	// 6. Install
-	installDir := filepath.Join(pm.config.InstallPath, manifest.PackageIdentifier)
-	
-	isZip := bestInstaller.InstallerType == InstallerTypeZip || strings.HasSuffix(strings.ToLower(bestInstaller.InstallerUrl), ".zip")
+	isZip := strings.EqualFold(download.Type, "zip") || strings.HasSuffix(strings.ToLower(download.URL), ".zip")
 	
 	if opts.Extract && isZip {
-		pm.logger.Printf("Extracting to %s", installDir)
-		if err := unzip(destPath, installDir); err != nil {
+		pm.logger.Printf("Extracting ZIP to: %s", installDir)
+		if err := unzip(cachePath, installDir); err != nil {
 			return fmt.Errorf("extracting zip: %w", err)
 		}
+		pm.logger.Printf("✓ Extracted to: %s", installDir)
 	} else {
-		pm.logger.Printf("Installing to %s", installDir)
+		// For non-zip or non-extract, just copy to install directory
+		pm.logger.Printf("Installing to: %s", installDir)
 		if err := os.MkdirAll(installDir, 0755); err != nil {
-			return err
+			return fmt.Errorf("creating install directory: %w", err)
 		}
-		finalPath := filepath.Join(installDir, fileName)
-		input, _ := os.ReadFile(destPath)
-		os.WriteFile(finalPath, input, 0755)
 		
-		pm.logger.Printf("✓ Package installed to: %s", finalPath)
+		finalPath := filepath.Join(installDir, fileName)
+		if err := copyFile(cachePath, finalPath); err != nil {
+			return fmt.Errorf("copying file: %w", err)
+		}
+		
+		// Make executable if it's a portable app
+		if strings.EqualFold(download.Type, "portable") || strings.EqualFold(download.Type, "exe") {
+			os.Chmod(finalPath, 0755)
+		}
+		
+		pm.logger.Printf("✓ Installed to: %s", finalPath)
 	}
 
-	if !opts.KeepArchive {
-		os.Remove(destPath)
+	// Clean up archive if requested
+	if !opts.KeepArchive && opts.Extract {
+		pm.logger.Printf("Removing archive: %s", cachePath)
+		os.Remove(cachePath)
 	}
 
 	return nil
 }
 
+// downloadFile downloads a file from URL to the specified path
+func (pm *PackageManager) downloadFile(ctx context.Context, url, destPath string) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := pm.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download failed with status: %d", resp.StatusCode)
+	}
+
+	out, err := os.Create(destPath)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, resp.Body)
+	return err
+}
+
 // fetchFirstValidManifest iterates through available versions to find a working one
 func (pm *PackageManager) fetchFirstValidManifest(ctx context.Context, entry *PackageEntry, requestedVer string) (*Manifest, error) {
-	// If the user asked for a specific version that isn't "latest", we shouldn't be here (handled in Download),
-	// but for GetInfo we might need this.
-	
 	versions := []string{}
 	
 	// Priority 1: Latest.Version (if exists)
@@ -239,9 +272,6 @@ func (pm *PackageManager) fetchFirstValidManifest(ctx context.Context, entry *Pa
 	}
 	
 	// Priority 2: Versions List (Raw)
-	// The API typically returns versions descending (newest first) or ascending.
-	// We'll try them in the order provided by the API, assuming the API puts relevant ones first.
-	// If "Latest.Version" was missing, Versions[0] is our best bet.
 	apiVersions := entry.GetVersions()
 	versions = append(versions, apiVersions...)
 	
@@ -281,41 +311,81 @@ func (pm *PackageManager) fetchFirstValidManifest(ctx context.Context, entry *Pa
 func (pm *PackageManager) selectBestMatch(results []PackageEntry, query string) *PackageEntry {
 	// 1. Exact ID Match
 	for _, p := range results {
-		if strings.EqualFold(p.ID, query) { return &p }
+		if strings.EqualFold(p.ID, query) {
+			return &p
+		}
 	}
 	// 2. Exact Name Match
 	for _, p := range results {
-		if strings.EqualFold(p.Latest.Name, query) { return &p }
+		if strings.EqualFold(p.Latest.Name, query) {
+			return &p
+		}
 	}
 	// 3. Suffix Match
 	suffix := "." + strings.ToLower(query)
 	for _, p := range results {
-		if strings.HasSuffix(strings.ToLower(p.ID), suffix) { return &p }
+		if strings.HasSuffix(strings.ToLower(p.ID), suffix) {
+			return &p
+		}
 	}
 	return &results[0]
 }
 
-func determineExtension(i *Installer) string {
-	u := strings.ToLower(i.InstallerUrl)
-	if strings.Contains(u, ".zip") { return "zip" }
-	if strings.Contains(u, ".msi") { return "msi" }
-	if strings.Contains(u, ".msix") { return "msix" }
-	if strings.Contains(u, ".exe") { return "exe" }
-	return "bin"
+func determineExtensionFromURL(url, installerType string) string {
+	u := strings.ToLower(url)
+	if strings.Contains(u, ".zip") {
+		return "zip"
+	}
+	if strings.Contains(u, ".msi") {
+		return "msi"
+	}
+	if strings.Contains(u, ".msix") {
+		return "msix"
+	}
+	if strings.Contains(u, ".exe") {
+		return "exe"
+	}
+	
+	// Fallback to installer type
+	switch strings.ToLower(installerType) {
+	case "zip":
+		return "zip"
+	case "msi":
+		return "msi"
+	case "msix":
+		return "msix"
+	case "exe":
+		return "exe"
+	default:
+		return "bin"
+	}
 }
 
 func sanitizeFilename(name string) string {
 	name = strings.ReplaceAll(name, "/", "_")
 	name = strings.ReplaceAll(name, "\\", "_")
+	name = strings.ReplaceAll(name, ":", "_")
 	return name
+}
+
+func copyFile(src, dst string) error {
+	input, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, input, 0755)
 }
 
 func verifyHash(path, expected string) error {
 	f, err := os.Open(path)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer f.Close()
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil { return err }
+	if _, err := io.Copy(h, f); err != nil {
+		return err
+	}
 	if !strings.EqualFold(hex.EncodeToString(h.Sum(nil)), expected) {
 		return fmt.Errorf("checksum mismatch")
 	}
@@ -324,23 +394,46 @@ func verifyHash(path, expected string) error {
 
 func unzip(src, dest string) error {
 	r, err := zip.OpenReader(src)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer r.Close()
+	
 	for _, f := range r.File {
 		fpath := filepath.Join(dest, f.Name)
-		if !strings.HasPrefix(fpath, filepath.Clean(dest)+string(os.PathSeparator)) { continue }
+		
+		// Check for ZipSlip vulnerability
+		if !strings.HasPrefix(fpath, filepath.Clean(dest)+string(os.PathSeparator)) {
+			continue
+		}
+		
 		if f.FileInfo().IsDir() {
 			os.MkdirAll(fpath, os.ModePerm)
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(fpath), os.ModePerm); err != nil { return err }
+		
+		if err := os.MkdirAll(filepath.Dir(fpath), os.ModePerm); err != nil {
+			return err
+		}
+		
 		out, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
-		if err != nil { return err }
+		if err != nil {
+			return err
+		}
+		
 		rc, err := f.Open()
-		if err != nil { out.Close(); return err }
-		io.Copy(out, rc)
+		if err != nil {
+			out.Close()
+			return err
+		}
+		
+		_, err = io.Copy(out, rc)
 		out.Close()
 		rc.Close()
+		
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
