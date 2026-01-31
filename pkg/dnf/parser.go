@@ -147,12 +147,18 @@ func ParsePrimary(r io.Reader) ([]*PackageInfo, error) {
 			}
 		}
 
-		// Parse requires - with cleanup for malformed names
+		// Parse requires - clean up malformed names (only if ENTIRE string is wrapped in parens)
 		for _, entry := range p.Format.Requires.Entries {
 			if entry.Name != "" && !strings.HasPrefix(entry.Name, "rpmlib(") {
-				// Clean up malformed dependency names (remove leading/trailing parentheses)
-				name := strings.TrimPrefix(entry.Name, "(")
-				name = strings.TrimSuffix(name, ")")
+				name := entry.Name
+				// Only remove wrapping parentheses if the WHOLE string is wrapped
+				// e.g., "(package-name)" -> "package-name"
+				// but keep "libssl.so.3()(64bit)" as-is
+				if strings.HasPrefix(name, "(") && strings.HasSuffix(name, ")") && 
+				   strings.Count(name, "(") == 1 && strings.Count(name, ")") == 1 {
+					name = strings.TrimPrefix(name, "(")
+					name = strings.TrimSuffix(name, ")")
+				}
 				pkg.Requires = append(pkg.Requires, name)
 			}
 		}
