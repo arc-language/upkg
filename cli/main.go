@@ -67,6 +67,7 @@ Setup (run once):
 Environment Management:
   env create <name> [--backend apt|apk|dpkg|brew|nix|winget|...]
                                 Create new isolated environment
+                                If no --backend is set, auto mode is used
   env list                      List all environments
   env activate <name>           Activate an environment (modifies shell)
   env deactivate                Deactivate current environment
@@ -103,9 +104,13 @@ Examples:
   echo 'eval "$(upkg init)"' >> ~/.bashrc
   source ~/.bashrc
   
-  # Create and use environment
+  # Create and use environment (auto mode, no backend needed)
+  upkg env create myproject
+  upkg env activate myproject
+  
+  # Or explicitly set a backend
   upkg env create myproject --backend apt
-  upkg env activate myproject    # Shell automatically modified!
+  upkg env activate myproject
   
   # Install packages with debug output
   upkg install gcc --debug
@@ -435,31 +440,36 @@ func handleEnvCreate(args []string) {
 	}
 
 	name := args[0]
-	backend := "apt" // default
+	backendName := "" // empty means auto
 
 	// Parse --backend flag
 	for i := 1; i < len(args); i++ {
 		if args[i] == "--backend" && i+1 < len(args) {
-			backend = args[i+1]
+			backendName = args[i+1]
 			i++
 		}
 	}
 
-	// Validate backend
-	validBackends := map[string]bool{
-		"apt": true, "brew": true, "nix": true,
-		"dnf": true, "pacman": true, "apk": true,
-		"zypper": true, "choco": true, "dpkg": true,
-		"winget": true,
+	// If a backend was explicitly set, validate it
+	if backendName != "" {
+		validBackends := map[string]bool{
+			"apt": true, "brew": true, "nix": true,
+			"dnf": true, "pacman": true, "apk": true,
+			"zypper": true, "choco": true, "dpkg": true,
+			"winget": true,
+		}
+
+		if !validBackends[backendName] {
+			fmt.Fprintf(os.Stderr, "Error: invalid backend '%s'\n", backendName)
+			fmt.Fprintf(os.Stderr, "Valid backends: apt, apk, dpkg, brew, nix, dnf, pacman, zypper, choco, winget\n")
+			os.Exit(1)
+		}
+	} else {
+		// No backend set, use auto
+		backendName = "auto"
 	}
 
-	if !validBackends[backend] {
-		fmt.Fprintf(os.Stderr, "Error: invalid backend '%s'\n", backend)
-		fmt.Fprintf(os.Stderr, "Valid backends: apt, apk, dpkg, brew, nix, dnf, pacman, zypper, choco, winget\n")
-		os.Exit(1)
-	}
-
-	envSpec, err := envManager.CreateEnv(name, backend)
+	envSpec, err := envManager.CreateEnv(name, backendName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -492,7 +502,7 @@ func handleEnvList(args []string) {
 	for _, e := range envs {
 		marker := "  "
 		if active != nil && e.Name == active.Name {
-			//marker += "* "
+			marker = "* "
 		}
 		fmt.Printf("%s%s\n", marker, e.Name)
 		fmt.Printf("     Backend: %s | Packages: %d\n", e.Backend, len(e.Packages))
@@ -513,7 +523,6 @@ func handleEnvActivate(args []string) {
 
 	// AUTO-DEACTIVATE any existing environment first
 	if active, err := envManager.GetActiveEnv(); err == nil && active.Name != name {
-		// Silent deactivation
 		envManager.DeactivateEnv()
 	}
 
@@ -571,10 +580,8 @@ func handleEnvInfo(args []string) {
 	var err error
 
 	if len(args) > 0 {
-		// Show info for specific environment
 		envSpec, err = envManager.LoadEnv(args[0])
 	} else {
-		// Show info for active environment
 		envSpec, err = envManager.GetActiveEnv()
 	}
 
@@ -656,7 +663,7 @@ func handleInstallCommand(args []string) {
 	// Create upkg manager with environment's install path
 	config := upkg.DefaultConfig()
 	config.InstallPath = envSpec.InstallPath
-	config.Debug = debug // Enable debug mode
+	config.Debug = debug
 
 	if debug {
 		config.Logger = log.New(os.Stderr, "[DEBUG] ", log.LstdFlags)
@@ -674,6 +681,10 @@ func handleInstallCommand(args []string) {
 		os.Exit(1)
 	}
 	defer manager.Close()
+
+	if debug {
+		fmt.Printf("Resolved backend: %s\n", manager.Backend())
+	}
 
 	// Install each package
 	for _, packageName := range packages {
@@ -713,7 +724,6 @@ func listDirectory(path string, indent string) {
 	for _, entry := range entries {
 		if entry.IsDir() {
 			fmt.Printf("%s%s/\n", indent, entry.Name())
-			// Only recurse one level to avoid too much output
 			if indent == "  " {
 				listDirectory(path+"/"+entry.Name(), indent+"  ")
 			}
@@ -738,7 +748,6 @@ func handleRunCommand(args []string) {
 
 	environment := envSpec.GetEnvironment()
 
-	// Execute command with environment
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Env = environment.BuildEnv()
 	cmd.Stdout = os.Stdout
@@ -762,7 +771,6 @@ func handleShellCommand(args []string) {
 
 	environment := envSpec.GetEnvironment()
 
-	// Generate shell code for eval (NOT a .sh file, just stdout)
 	shellCode := environment.GenerateActivateScript()
 	fmt.Print(shellCode)
 }
@@ -772,23 +780,23 @@ func handleInfoCommand(args []string) {
 		fmt.Fprintf(os.Stderr, "Usage: upkg info <package> [--debug]\n")
 		os.Exit(1)
 	}
-    
-    // Check for debug flag
-    debug := false
-    packageName := ""
-    
-    for _, arg := range args {
-        if arg == "--debug" || arg == "-d" {
-            debug = true
-        } else {
-            packageName = arg
-        }
-    }
-    
-    if packageName == "" {
-        fmt.Fprintf(os.Stderr, "Error: Package name required\n")
-        os.Exit(1)
-    }
+
+	// Check for debug flag
+	debug := false
+	packageName := ""
+
+	for _, arg := range args {
+		if arg == "--debug" || arg == "-d" {
+			debug = true
+		} else {
+			packageName = arg
+		}
+	}
+
+	if packageName == "" {
+		fmt.Fprintf(os.Stderr, "Error: Package name required\n")
+		os.Exit(1)
+	}
 
 	envSpec, err := envManager.GetActiveEnv()
 	if err != nil {
@@ -796,13 +804,12 @@ func handleInfoCommand(args []string) {
 		os.Exit(1)
 	}
 
-	// Create manager
 	config := upkg.DefaultConfig()
 	config.InstallPath = envSpec.InstallPath
 	config.Debug = debug
-	
+
 	if debug {
-	    config.Logger = log.New(os.Stderr, "[DEBUG] ", log.LstdFlags)
+		config.Logger = log.New(os.Stderr, "[DEBUG] ", log.LstdFlags)
 	}
 
 	backendType := mapBackendName(envSpec.Backend)
@@ -813,7 +820,6 @@ func handleInfoCommand(args []string) {
 	}
 	defer manager.Close()
 
-	// Get package info
 	info, err := manager.GetInfo(context.Background(), packageName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -850,7 +856,6 @@ func handleSearchCommand(args []string) {
 
 	query := strings.Join(args, " ")
 
-	// Create manager
 	config := upkg.DefaultConfig()
 	config.InstallPath = envSpec.InstallPath
 
@@ -862,7 +867,6 @@ func handleSearchCommand(args []string) {
 	}
 	defer manager.Close()
 
-	// Search packages
 	fmt.Printf("Searching for '%s'...\n\n", query)
 	results, err := manager.Search(context.Background(), query)
 	if err != nil {
