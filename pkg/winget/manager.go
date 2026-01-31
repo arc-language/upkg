@@ -52,97 +52,65 @@ func NewPackageManager(cfg *Config) *PackageManager {
 }
 
 func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) error {
-	pm.logger.Printf("Searching for package: %s", opts.Package)
+	pm.logger.Printf("Resolving package: %s", opts.Package)
 
-	// 1. Resolve Package ID and Version
 	id := opts.Package
 	version := opts.Version
 	
+	// 1. Resolve Package ID and Version
 	if version == "" || version == "latest" {
-		results, err := pm.client.Search(ctx, opts.Package)
-		if err != nil {
-			return fmt.Errorf("searching for package: %w", err)
-		}
-		if len(results) == 0 {
-			return fmt.Errorf("package '%s' not found", opts.Package)
-		}
-		
-		// Improve matching logic
-		// Priority:
-		// 1. Exact ID match (case-insensitive)
-		// 2. Exact Name match (case-insensitive)
-		// 3. ID ends with ".<Package>" (e.g. searching "wget" matches "Jeremys.wget")
-		
-		var entry PackageEntry
-		found := false
-		
-		// 1. Exact ID Match
-		for _, p := range results {
-			if strings.EqualFold(p.ID, opts.Package) {
-				entry = p
-				found = true
-				break
-			}
-		}
-		
-		// 2. Exact Name Match
-		if !found {
-			for _, p := range results {
-				if strings.EqualFold(p.Latest.Name, opts.Package) {
-					entry = p
-					found = true
-					break
-				}
+		var entry *PackageEntry
+		var err error
+
+		// Strategy A: Direct ID Lookup (Preferred)
+		// If input looks like an ID (Publisher.Package), try to fetch it directly.
+		if strings.Contains(opts.Package, ".") {
+			pm.logger.Printf("Attempting direct ID lookup for '%s'...", opts.Package)
+			entry, err = pm.client.GetPackage(ctx, opts.Package)
+			if err == nil {
+				pm.logger.Printf("✓ Found package via ID: %s", entry.ID)
+			} else {
+				pm.logger.Printf("Direct lookup failed: %v", err)
 			}
 		}
 
-		// 3. Suffix Match on ID (Common in Winget, e.g., Publisher.App)
-		if !found {
-			suffix := "." + strings.ToLower(opts.Package)
-			for _, p := range results {
-				if strings.HasSuffix(strings.ToLower(p.ID), suffix) {
-					entry = p
-					found = true
-					break
-				}
+		// Strategy B: Search (Fallback)
+		// If direct lookup failed or input is a keyword (no dot), perform a search.
+		if entry == nil {
+			pm.logger.Printf("Falling back to search for '%s'...", opts.Package)
+			results, err := pm.client.Search(ctx, opts.Package)
+			if err != nil {
+				return fmt.Errorf("searching for package: %w", err)
 			}
+			if len(results) == 0 {
+				return fmt.Errorf("package '%s' not found", opts.Package)
+			}
+
+			// Select best match from search results
+			entry = pm.selectBestMatch(results, opts.Package)
+			pm.logger.Printf("Selected from search: %s", entry.ID)
 		}
 
-		if !found {
-			// Fallback: If we didn't find a good match, picking result[0] is risky.
-			// Only pick it if the search score is high or it looks somewhat relevant.
-			// For now, we'll log a warning and pick the first one, but this is often where 'Kate' comes from for 'wget'.
-			pm.logger.Printf("Warning: No exact match found for '%s'. Using best guess: %s", opts.Package, results[0].ID)
-			entry = results[0]
-		} else {
-			pm.logger.Printf("Found match: %s", entry.ID)
-		}
-		
 		id = entry.ID
 		
-		// Resolve Version
-		if len(entry.Versions) > 0 {
-			// Try the last version in the list (usually latest)
-			version = entry.Versions[len(entry.Versions)-1]
-		} else if entry.Latest.Version != "" {
-			// Use the version from the Latest info block
+		// Version Selection
+		// Priority: Latest.Version > Last in Versions list > "latest" literal
+		if entry.Latest.Version != "" {
 			version = entry.Latest.Version
+		} else if len(entry.Versions) > 0 {
+			version = entry.Versions[len(entry.Versions)-1]
 		} else {
-			// We have no version string. winget.run might not support "latest" in manifest path.
-			// But we have no choice.
 			version = "latest"
 		}
-		
-		pm.logger.Printf("Resolved: %s @ %s", id, version)
+		pm.logger.Printf("Resolved Version: %s", version)
 	}
 
 	// 2. Get Manifest
 	manifest, err := pm.client.GetManifest(ctx, id, version)
 	if err != nil {
 		if version != "latest" {
-			// If specific version failed, try to recover using "latest" ONLY IF we haven't tried it yet.
-			// Note: This often fails on winget.run but is worth a shot as last resort.
-			pm.logger.Printf("Failed to get version %s, trying 'latest'...", version)
+			// If resolved version fails, try "latest" literal as last resort
+			pm.logger.Printf("Failed to get version %s, retrying with 'latest'...", version)
 			manifest, err = pm.client.GetManifest(ctx, id, "latest")
 			if err != nil {
 				return fmt.Errorf("fetching manifest: %w", err)
@@ -168,7 +136,7 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 			bestInstaller = &inst
 			break
 		}
-		// Fallback: x64 can run x86
+		// Fallback: x64 can run x86 on Windows
 		if wingetArch == "x64" && strings.EqualFold(inst.Architecture, "x86") {
 			if bestInstaller == nil {
 				bestInstaller = &inst
@@ -183,10 +151,9 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 	pm.logger.Printf("Selected installer: %s (%s)", bestInstaller.InstallerType, bestInstaller.Architecture)
 
 	// 4. Download
-	fileName := fmt.Sprintf("%s-%s.%s", manifest.PackageName, manifest.PackageVersion, determineExtension(bestInstaller))
-	// Sanitize filename
-	fileName = strings.ReplaceAll(fileName, "/", "_")
-	fileName = strings.ReplaceAll(fileName, "\\", "_")
+	ext := determineExtension(bestInstaller)
+	fileName := fmt.Sprintf("%s-%s.%s", manifest.PackageName, manifest.PackageVersion, ext)
+	fileName = sanitizeFilename(fileName)
 	
 	destPath := filepath.Join(pm.config.CachePath, "downloads", fileName)
 	
@@ -217,12 +184,16 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 	// 6. Install / Extract
 	installDir := filepath.Join(pm.config.InstallPath, manifest.PackageIdentifier)
 	
-	if opts.Extract && (bestInstaller.InstallerType == InstallerTypeZip || strings.HasSuffix(bestInstaller.InstallerUrl, ".zip")) {
+	// Determine if we should extract based on installer type
+	isZip := bestInstaller.InstallerType == InstallerTypeZip || strings.HasSuffix(strings.ToLower(bestInstaller.InstallerUrl), ".zip")
+	
+	if opts.Extract && isZip {
 		pm.logger.Printf("Extracting zip to %s", installDir)
 		if err := unzip(destPath, installDir); err != nil {
 			return fmt.Errorf("extracting zip: %w", err)
 		}
 	} else {
+		// For non-zips (exe, msi) or if extract is false, move the file
 		pm.logger.Printf("Moving installer to %s", installDir)
 		if err := os.MkdirAll(installDir, 0755); err != nil {
 			return err
@@ -232,8 +203,7 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 		input, _ := os.ReadFile(destPath)
 		os.WriteFile(finalPath, input, 0755)
 		
-		pm.logger.Printf("✓ Package downloaded. Note: This is an installer (%s).", bestInstaller.InstallerType)
-		pm.logger.Printf("  Location: %s", finalPath)
+		pm.logger.Printf("✓ Package downloaded to: %s", finalPath)
 	}
 
 	if !opts.KeepArchive {
@@ -248,6 +218,20 @@ func (pm *PackageManager) Search(ctx context.Context, query string) ([]PackageEn
 }
 
 func (pm *PackageManager) GetInfo(ctx context.Context, name string) (*Manifest, error) {
+	// Try direct lookup first
+	if strings.Contains(name, ".") {
+		entry, err := pm.client.GetPackage(ctx, name)
+		if err == nil {
+			version := entry.Latest.Version
+			if version == "" && len(entry.Versions) > 0 {
+				version = entry.Versions[len(entry.Versions)-1]
+			}
+			if version == "" { version = "latest" }
+			return pm.client.GetManifest(ctx, entry.ID, version)
+		}
+	}
+
+	// Fallback to Search
 	results, err := pm.client.Search(ctx, name)
 	if err != nil {
 		return nil, err
@@ -256,47 +240,56 @@ func (pm *PackageManager) GetInfo(ctx context.Context, name string) (*Manifest, 
 		return nil, fmt.Errorf("package not found")
 	}
 	
-	// Better matching logic for GetInfo as well
-	var entry PackageEntry
-	found := false
-	for _, p := range results {
-		if strings.EqualFold(p.ID, name) {
-			entry = p
-			found = true
-			break
-		}
-	}
-	if !found {
-		entry = results[0]
-	}
+	entry := pm.selectBestMatch(results, name)
 	
-	id := entry.ID
-	version := "latest"
-	if len(entry.Versions) > 0 {
+	version := entry.Latest.Version
+	if version == "" && len(entry.Versions) > 0 {
 		version = entry.Versions[len(entry.Versions)-1]
-	} else if entry.Latest.Version != "" {
-		version = entry.Latest.Version
 	}
+	if version == "" { version = "latest" }
 
-	return pm.client.GetManifest(ctx, id, version)
+	return pm.client.GetManifest(ctx, entry.ID, version)
 }
 
 // Helpers
 
+func (pm *PackageManager) selectBestMatch(results []PackageEntry, query string) *PackageEntry {
+	// 1. Exact ID Match
+	for _, p := range results {
+		if strings.EqualFold(p.ID, query) {
+			return &p
+		}
+	}
+	// 2. Exact Name Match
+	for _, p := range results {
+		if strings.EqualFold(p.Latest.Name, query) {
+			return &p
+		}
+	}
+	// 3. Suffix Match (e.g. "wget" matches "JernejSimoncic.Wget")
+	suffix := "." + strings.ToLower(query)
+	for _, p := range results {
+		if strings.HasSuffix(strings.ToLower(p.ID), suffix) {
+			return &p
+		}
+	}
+	// 4. Fallback
+	return &results[0]
+}
+
 func determineExtension(i *Installer) string {
-	if strings.Contains(i.InstallerUrl, ".zip") {
-		return "zip"
-	}
-	if strings.Contains(i.InstallerUrl, ".msi") {
-		return "msi"
-	}
-	if strings.Contains(i.InstallerUrl, ".msix") {
-		return "msix"
-	}
-	if strings.Contains(i.InstallerUrl, ".exe") {
-		return "exe"
-	}
+	u := strings.ToLower(i.InstallerUrl)
+	if strings.Contains(u, ".zip") { return "zip" }
+	if strings.Contains(u, ".msi") { return "msi" }
+	if strings.Contains(u, ".msix") { return "msix" }
+	if strings.Contains(u, ".exe") { return "exe" }
 	return "bin"
+}
+
+func sanitizeFilename(name string) string {
+	name = strings.ReplaceAll(name, "/", "_")
+	name = strings.ReplaceAll(name, "\\", "_")
+	return name
 }
 
 func verifyHash(path, expected string) error {
@@ -328,7 +321,6 @@ func unzip(src, dest string) error {
 	for _, f := range r.File {
 		fpath := filepath.Join(dest, f.Name)
 		
-		// Zip Slip protection
 		if !strings.HasPrefix(fpath, filepath.Clean(dest)+string(os.PathSeparator)) {
 			continue
 		}
@@ -354,7 +346,6 @@ func unzip(src, dest string) error {
 		}
 
 		_, err = io.Copy(outFile, rc)
-
 		outFile.Close()
 		rc.Close()
 

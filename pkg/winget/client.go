@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -29,6 +30,51 @@ func NewClient(timeout time.Duration, logger *log.Logger) *Client {
 		baseURL: APIBaseURL,
 		logger:  logger,
 	}
+}
+
+// GetPackage fetches details for a specific package ID directly
+func (c *Client) GetPackage(ctx context.Context, id string) (*PackageEntry, error) {
+	// Winget IDs are typically Publisher.Package. The API expects /packages/Publisher/Package
+	// We split by the first dot to separate Publisher and Package Name.
+	parts := strings.SplitN(id, ".", 2)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid package ID format: %s (expected Publisher.Package)", id)
+	}
+
+	publisher := url.PathEscape(parts[0])
+	packageName := url.PathEscape(parts[1])
+	
+	url := fmt.Sprintf("%s/packages/%s/%s", c.baseURL, publisher, packageName)
+	c.logger.Printf("[Winget API] Fetching Package: %s", url)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("package not found")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API request failed with status: %d", resp.StatusCode)
+	}
+
+	// The endpoint returns { "Package": { ... } }
+	var result struct {
+		Package PackageEntry `json:"Package"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding package response: %w", err)
+	}
+
+	return &result.Package, nil
 }
 
 // Search searches for packages by query string

@@ -31,7 +31,6 @@ type VersionInfo struct {
 }
 
 // Manifest represents the full package manifest (usually a singleton or merged view)
-// Note: This matches the structure returned by /v2/manifests/{id}/{version}
 type Manifest struct {
 	PackageIdentifier string      `json:"PackageIdentifier"`
 	PackageVersion    string      `json:"PackageVersion"`
@@ -58,7 +57,7 @@ type Installer struct {
 type DownloadOptions struct {
 	Package      string
 	Version      string
-	Architecture string // Go runtime format (amd64), will be converted
+	Architecture string
 	Extract      bool
 	KeepArchive  bool
 	VerifyHash   bool
