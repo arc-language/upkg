@@ -1,6 +1,6 @@
 # deps/sqlite3/index.toml
 
-aliases = ["sqlite"]
+aliases = ["sqlite3"]
 
 [backends]
 apt     = "libsqlite3-dev"
