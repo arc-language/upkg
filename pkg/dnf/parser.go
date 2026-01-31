@@ -140,26 +140,18 @@ func ParsePrimary(r io.Reader) ([]*PackageInfo, error) {
 			ChecksumType:  p.Checksum.Type,
 		}
 
-		// Parse provides
+		// Parse provides - keep all entries as-is
 		for _, entry := range p.Format.Provides.Entries {
 			if entry.Name != "" {
 				pkg.Provides = append(pkg.Provides, entry.Name)
 			}
 		}
 
-		// Parse requires - clean up malformed names (only if ENTIRE string is wrapped in parens)
+		// Parse requires - keep all entries as-is
+		// Filter out rpmlib() dependencies as they're metadata-only
 		for _, entry := range p.Format.Requires.Entries {
 			if entry.Name != "" && !strings.HasPrefix(entry.Name, "rpmlib(") {
-				name := entry.Name
-				// Only remove wrapping parentheses if the WHOLE string is wrapped
-				// e.g., "(package-name)" -> "package-name"
-				// but keep "libssl.so.3()(64bit)" as-is
-				if strings.HasPrefix(name, "(") && strings.HasSuffix(name, ")") && 
-				   strings.Count(name, "(") == 1 && strings.Count(name, ")") == 1 {
-					name = strings.TrimPrefix(name, "(")
-					name = strings.TrimSuffix(name, ")")
-				}
-				pkg.Requires = append(pkg.Requires, name)
+				pkg.Requires = append(pkg.Requires, entry.Name)
 			}
 		}
 

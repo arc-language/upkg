@@ -17,6 +17,65 @@ import (
 	"github.com/sassoftware/go-rpmutils"
 )
 
+// Dependency type classification
+type depType int
+
+const (
+	depTypePackage depType = iota // Regular package name
+	depTypeFile                    // File path dependency
+	depTypeSoname                  // Shared library soname
+	depTypeSymbol                  // Versioned symbol
+	depTypeVirtual                 // Virtual capability
+)
+
+// classifyDependency determines what type of dependency this is
+func classifyDependency(dep string) depType {
+	// File path
+	if strings.HasPrefix(dep, "/") {
+		return depTypeFile
+	}
+	
+	// Soname or versioned symbol (contains .so)
+	if strings.Contains(dep, ".so") {
+		return depTypeSoname
+	}
+	
+	// Virtual capabilities with parentheses but no .so
+	if strings.Contains(dep, "(") {
+		return depTypeVirtual
+	}
+	
+	// Regular package name
+	return depTypePackage
+}
+
+// shouldSkipDependency determines if we should skip resolving this dependency
+// In a portable package manager, we only resolve package-name dependencies
+func shouldSkipDependency(dep string) bool {
+	depKind := classifyDependency(dep)
+	
+	switch depKind {
+	case depTypePackage:
+		return false // Process package dependencies
+	case depTypeFile, depTypeSoname, depTypeSymbol, depTypeVirtual:
+		return true // Skip runtime/file dependencies
+	default:
+		return true
+	}
+}
+
+// cleanDependencyName extracts the base name from a dependency
+// e.g., "package >= 1.2.3" -> "package"
+func cleanDependencyName(dep string) string {
+	// Remove version operators and constraints
+	for _, op := range []string{">=", "<=", "=", ">", "<"} {
+		if idx := strings.Index(dep, op); idx != -1 {
+			return strings.TrimSpace(dep[:idx])
+		}
+	}
+	return strings.TrimSpace(dep)
+}
+
 // NewPackageManager creates a new Fedora/DNF package manager
 func NewPackageManager(cfg *Config) *PackageManager {
 	if cfg == nil {
@@ -110,44 +169,46 @@ func (pm *PackageManager) installRecursive(ctx context.Context, pkgRequest strin
 		return fmt.Errorf("resolving %s: %w", pkgRequest, err)
 	}
 
+	// Skip if already processed
 	if visited[pkgInfo.Name] {
 		return nil
 	}
 	visited[pkgInfo.Name] = true
 
-	pm.logger.Printf("Processing package: %s (resolved from %s)", pkgInfo.Name, pkgRequest)
+	pm.logger.Printf("Processing package: %s", pkgInfo.Name)
 
-	// 2. Install Dependencies
+	// 2. Process Dependencies (only package-name dependencies)
 	for _, req := range pkgInfo.Requires {
-		reqName := cleanReqName(req)
-		
-		// Skip self-reference or known circulars
-		if reqName == pkgInfo.Name { 
-			continue 
-		}
-		
-		// Skip file-based dependencies that start with /
-		// These should be pre-satisfied in the environment
-		if strings.HasPrefix(reqName, "/") {
-			pm.logger.Printf("  -> Dependency: %s (file dependency, skipping)", reqName)
+		// Skip self-reference
+		if cleanDependencyName(req) == pkgInfo.Name {
 			continue
 		}
 		
-		// Skip malformed dependencies starting with (
-		if strings.HasPrefix(reqName, "(") {
-			pm.logger.Printf("  -> Dependency: %s (malformed, skipping)", reqName)
+		// Classify and skip non-package dependencies
+		if shouldSkipDependency(req) {
+			if pm.config.Debug {
+				depKind := classifyDependency(req)
+				kindStr := map[depType]string{
+					depTypeFile:    "file",
+					depTypeSoname:  "soname",
+					depTypeSymbol:  "symbol",
+					depTypeVirtual: "virtual",
+				}[depKind]
+				pm.logger.Printf("  -> Skipping %s dependency: %s", kindStr, req)
+			}
 			continue
 		}
 
-		pm.logger.Printf("  -> Dependency: %s", reqName)
+		pm.logger.Printf("  -> Dependency: %s", req)
 		
-		if err := pm.installRecursive(ctx, reqName, arch, visited, opts); err != nil {
-			// Warn but proceed
-			pm.logger.Printf("  ⚠️  Warning: failed to install dependency %s: %v", reqName, err)
+		// Recursively install package dependency
+		if err := pm.installRecursive(ctx, req, arch, visited, opts); err != nil {
+			// Warn but continue - some dependencies might be optional
+			pm.logger.Printf("  ⚠️  Warning: %v", err)
 		}
 	}
 
-	// 3. Download
+	// 3. Download package
 	rpmPath := filepath.Join(pm.config.CachePath, "downloads",
 		fmt.Sprintf("%s-%s.%s.rpm", pkgInfo.Name, pkgInfo.FullVersion(), pkgInfo.Architecture))
 
@@ -166,6 +227,7 @@ func (pm *PackageManager) installRecursive(ctx context.Context, pkgRequest strin
 			baseURL, pm.config.Release, arch, pkgInfo.Location)
 	}
 
+	// Download if not cached
 	if _, err := os.Stat(rpmPath); os.IsNotExist(err) {
 		pm.logger.Printf("Downloading %s...", pkgInfo.Name)
 		if err := pm.downloadPackage(ctx, downloadURL, rpmPath); err != nil {
@@ -182,7 +244,7 @@ func (pm *PackageManager) installRecursive(ctx context.Context, pkgRequest strin
 		}
 	}
 
-	// 5. Extract package with retry logic for permissions
+	// 5. Extract package
 	if opts.Extract {
 		pm.logger.Printf("Extracting %s...", pkgInfo.Name)
 		if err := pm.extractRPMPackage(rpmPath, pm.config.InstallPath); err != nil {
@@ -198,35 +260,17 @@ func (pm *PackageManager) installRecursive(ctx context.Context, pkgRequest strin
 	return nil
 }
 
-// resolvePackage finds a package by name OR by what it provides, preferring the target Arch
+// resolvePackage finds a package by name or by what it provides
+// Only resolves package-name style dependencies, not sonames/files
 func (pm *PackageManager) resolvePackage(name string, arch Architecture) (*PackageInfo, error) {
-	clean := cleanReqName(name)
+	clean := cleanDependencyName(name)
 
-	// Skip file-based dependencies - they're usually provided by base packages
-	// already in the environment or are circular dependencies
-	if strings.HasPrefix(clean, "/") {
-		// These are file paths, not package names
-		// Check if any package provides them
-		if providers, ok := pm.cache.providers[clean]; ok && len(providers) > 0 {
-			// Prefer exact architecture match
-			for _, p := range providers {
-				if p.Architecture == string(arch) {
-					return p, nil
-				}
-			}
-			// Then noarch
-			for _, p := range providers {
-				if p.Architecture == "noarch" {
-					return p, nil
-				}
-			}
-			return providers[0], nil
-		}
-		// If not found, skip - these are often already satisfied in the environment
-		return nil, fmt.Errorf("file dependency '%s' not provided by any package", clean)
+	// Try direct package name lookup first (most common case)
+	if pkg, ok := pm.cache.packages[clean]; ok {
+		return pkg, nil
 	}
 
-	// 1. Try providers map
+	// Try providers map for virtual packages
 	if providers, ok := pm.cache.providers[clean]; ok && len(providers) > 0 {
 		// Prefer exact architecture match
 		for _, p := range providers {
@@ -240,18 +284,11 @@ func (pm *PackageManager) resolvePackage(name string, arch Architecture) (*Packa
 				return p, nil
 			}
 		}
-		// Fallback to first available (better than failing)
+		// Fallback to first available
 		return providers[0], nil
 	}
 
-	return nil, fmt.Errorf("package or provider '%s' not found", name)
-}
-
-func cleanReqName(req string) string {
-	if idx := strings.IndexAny(req, "<>="); idx != -1 {
-		return strings.TrimSpace(req[:idx])
-	}
-	return req
+	return nil, fmt.Errorf("package '%s' not found", clean)
 }
 
 // updatePackageIndex updates the local package index cache
@@ -342,20 +379,35 @@ func (pm *PackageManager) updatePackageIndex(ctx context.Context, arch Architect
 		return fmt.Errorf("parsing primary.xml: %w", err)
 	}
 
+	// Build package and provider indexes
+	packageCount := 0
+	providerCount := 0
+	
 	for _, pkg := range packages {
+		// Only index packages for the target architecture or noarch
 		if pkg.Architecture != string(arch) && pkg.Architecture != "noarch" {
 			continue
 		}
+		packageCount++
 
+		// Index by package name
 		pm.cache.packages[pkg.Name] = pkg
+		
+		// Package name always provides itself
 		pm.cache.providers[pkg.Name] = append(pm.cache.providers[pkg.Name], pkg)
 		
+		// Index all provides (including sonames, but we won't use them for resolution)
 		for _, provide := range pkg.Provides {
-			pm.cache.providers[provide] = append(pm.cache.providers[provide], pkg)
+			// Only index package-name style provides for resolution
+			// Skip sonames and virtual capabilities
+			if !shouldSkipDependency(provide) {
+				pm.cache.providers[provide] = append(pm.cache.providers[provide], pkg)
+				providerCount++
+			}
 		}
 	}
 
-	pm.logger.Printf("  ✓ Parsed %d packages, %d unique providers", len(packages), len(pm.cache.providers))
+	pm.logger.Printf("  ✓ Indexed %d packages, %d package-provides", packageCount, providerCount)
 	pm.cache.lastUpdate = time.Now()
 
 	return nil
