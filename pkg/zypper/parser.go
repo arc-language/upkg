@@ -84,9 +84,22 @@ func ParsePrimary(r io.Reader, filename string, repoName string) ([]*PackageInfo
 				// Parse dependencies from rpm:requires
 				var deps []Dependency
 				for _, entry := range p.Format.Requires.Entries {
-					// Skip library dependencies (they usually start with lib or contain .so)
-					// We only want package-level dependencies
-					if strings.Contains(entry.Name, ".so") || strings.HasPrefix(entry.Name, "/") {
+					// --- Dependency Filtering Logic ---
+					
+					// 1. Skip library dependencies (.so)
+					if strings.Contains(entry.Name, ".so") {
+						continue
+					}
+					// 2. Skip absolute paths (usually file dependencies like /bin/sh)
+					if strings.HasPrefix(entry.Name, "/") {
+						continue
+					}
+					// 3. Skip rpmlib internal dependencies (e.g., rpmlib(PayloadIsZstd))
+					if strings.HasPrefix(entry.Name, "rpmlib(") {
+						continue
+					}
+					// 4. Skip config entries (e.g., config(package))
+					if strings.HasPrefix(entry.Name, "config(") {
 						continue
 					}
 

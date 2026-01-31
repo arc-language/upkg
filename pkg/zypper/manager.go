@@ -65,6 +65,7 @@ func NewPackageManager(cfg *Config) *PackageManager {
 	}
 }
 
+// Download downloads and installs a package and its dependencies
 func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) error {
 	if opts.Architecture == "" {
 		opts.Architecture = DefaultArch
@@ -72,17 +73,53 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 
 	pm.logger.Printf("Starting operation for package: %s", opts.Package)
 
-	// 1. Update/Sync DB
+	// 1. Update/Sync DB once at the top level
 	if err := pm.updateDB(ctx, opts.Architecture); err != nil {
 		return err
 	}
 
-	// 2. Find Package
+	// Track installed packages to avoid loops
+	visited := make(map[string]bool)
+
+	return pm.installRecursive(ctx, opts, visited)
+}
+
+// installRecursive handles the actual download, dependency resolution, and extraction
+func (pm *PackageManager) installRecursive(ctx context.Context, opts *DownloadOptions, visited map[string]bool) error {
+	// Skip if already visited/installed in this transaction
+	if visited[opts.Package] {
+		return nil
+	}
+	visited[opts.Package] = true
+
+	// 1. Find Package
 	pkg, err := pm.findPackage(opts.Package, opts.Version)
 	if err != nil {
-		return err
+		// If we can't find a dependency, we log a warning but don't fail hard,
+		// as it might be a virtual package or capability provided by the system.
+		pm.logger.Printf("  ⚠️ Warning: Could not find package/dependency '%s': %v", opts.Package, err)
+		return nil
 	}
-	pm.logger.Printf("  Found package: %s %s (Repo: %s)", pkg.Name, pkg.Version, pkg.Repository)
+	
+	pm.logger.Printf("Processing: %s %s", pkg.Name, pkg.Version)
+
+	// 2. Resolve Dependencies Recursive Loop
+	if len(pkg.Dependencies) > 0 {
+		pm.logger.Printf("  Resolving dependencies for %s...", pkg.Name)
+		for _, dep := range pkg.Dependencies {
+			pm.logger.Printf("    -> Dependency: %s", dep.Name)
+			
+			// Create options for the dependency
+			depOpts := *opts // Shallow copy
+			depOpts.Package = dep.Name
+			depOpts.Version = "" // Always use latest available for dependencies for now
+			
+			// Recurse
+			if err := pm.installRecursive(ctx, &depOpts, visited); err != nil {
+				pm.logger.Printf("    ⚠️ Warning: Failed to install dependency %s: %v", dep.Name, err)
+			}
+		}
+	}
 
 	// 3. Download
 	// URL Construction: Mirror / Distribution / RepoPath / LocationFromXML
@@ -93,14 +130,13 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 
 	destPath := filepath.Join(pm.config.CachePath, "downloads", filepath.Base(pkg.Location))
 
-	pm.logger.Printf("  Downloading from: %s", downloadURL)
+	pm.logger.Printf("  Downloading %s...", pkg.Name)
 	if err := pm.downloadFile(ctx, downloadURL, destPath); err != nil {
-		return err
+		return fmt.Errorf("downloading %s: %w", pkg.Name, err)
 	}
 
 	// 4. Verify
 	if opts.VerifyHash && pkg.Checksum != "" {
-		// Zypper primary.xml can use sha256 or sha512
 		if err := pm.verifyHash(destPath, pkg.Checksum, pkg.ChecksumType); err != nil {
 			return err
 		}
@@ -108,9 +144,9 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 
 	// 5. Extract
 	if opts.Extract {
-		pm.logger.Printf("  Extracting to: %s", pm.config.InstallPath)
+		pm.logger.Printf("  Extracting %s...", pkg.Name)
 		if err := pm.extractRPM(destPath, pm.config.InstallPath); err != nil {
-			return err
+			return fmt.Errorf("extracting %s: %w", pkg.Name, err)
 		}
 		if !opts.KeepArchive {
 			os.Remove(destPath)
@@ -170,7 +206,9 @@ func (pm *PackageManager) updateDB(ctx context.Context, arch string) error {
 		// 3. Filter by architecture and add to cache
 		count := 0
 		for _, p := range pkgs {
+			// Basic arch filtering
 			if p.Architecture == "noarch" || p.Architecture == arch {
+				// Simple Last-Write-Wins for versioning in this map
 				pm.cache.packages[p.Name] = p
 				count++
 			}
@@ -213,8 +251,6 @@ func (pm *PackageManager) verifyHash(path, expected, hashType string) error {
 
 	var sum []byte
 
-	pm.logger.Printf("  Verifying %s hash...", hashType)
-
 	if hashType == "sha512" {
 		h := sha512.New()
 		if _, err := io.Copy(h, f); err != nil {
@@ -228,6 +264,7 @@ func (pm *PackageManager) verifyHash(path, expected, hashType string) error {
 		}
 		sum = h.Sum(nil)
 	} else {
+		// PM shouldn't fail if the XML uses a hash we don't support yet, just warn
 		pm.logger.Printf("  ⚠️ Skipping verification (unsupported hash type: %s)", hashType)
 		return nil
 	}
@@ -237,12 +274,10 @@ func (pm *PackageManager) verifyHash(path, expected, hashType string) error {
 		return fmt.Errorf("hash mismatch: want %s, got %s", expected, actual)
 	}
 	
-	pm.logger.Printf("  ✓ Hash verified")
 	return nil
 }
 
 // extractRPM extracts an RPM package.
-// RPM = Header + CPIO Archive (usually compressed)
 func (pm *PackageManager) extractRPM(rpmPath, dest string) error {
 	f, err := os.Open(rpmPath)
 	if err != nil {
@@ -288,7 +323,6 @@ func (pm *PackageManager) extractRPM(rpmPath, dest string) error {
 		return fmt.Errorf("could not find compressed archive within RPM (scanned %d bytes)", n)
 	}
 
-	pm.logger.Printf("  Found %s archive at offset %d", format, offset)
 	f.Seek(offset, 0)
 
 	// 2. Decompress
