@@ -34,6 +34,7 @@ const (
 	BackendChoco  = backend.BackendChoco
 	BackendPacman = backend.BackendPacman
 	BackendZypper = backend.BackendZypper
+	BackendWinget = backend.BackendWinget // Added Winget
 	BackendAuto   = backend.BackendAuto
 )
 
@@ -76,6 +77,8 @@ func NewManager(backendType backend.BackendType, config *backend.Config) (*Manag
 		b, err = backend.NewPacmanBackend(config)
 	case backend.BackendZypper:
 		b, err = backend.NewZypperBackend(config)
+	case backend.BackendWinget:
+		b, err = backend.NewWingetBackend(config) // Added Winget constructor
 	case backend.BackendAuto:
 		b, err = autoDetectBackend(config)
 	default:
@@ -103,7 +106,15 @@ func autoDetectBackend(config *backend.Config) (backend.Backend, error) {
 	}
 
 	if runtime.GOOS == "windows" {
-		// Try Chocolatey on Windows
+		// Prioritize Winget on Windows (Modern Standard)
+		// Since our implementation uses the REST API, it works on any Windows machine
+		// independent of the CLI tool presence, but we prioritize it here.
+		b, err := backend.NewWingetBackend(config)
+		if err == nil {
+			return b, nil
+		}
+
+		// Fallback to Chocolatey
 		if err := choco.DetectPlatform(); err == nil {
 			b, err := backend.NewChocoBackend(config)
 			if err == nil {

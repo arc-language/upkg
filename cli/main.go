@@ -65,7 +65,7 @@ Setup (run once):
                                 Add to your shell RC: eval "$(upkg init)"
 
 Environment Management:
-  env create <name> [--backend apt|apk|dpkg|brew|nix|...]
+  env create <name> [--backend apt|apk|dpkg|brew|nix|winget|...]
                                 Create new isolated environment
   env list                      List all environments
   env activate <name>           Activate an environment (modifies shell)
@@ -430,7 +430,7 @@ func handleEnvCommand(args []string) {
 
 func handleEnvCreate(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintf(os.Stderr, "Usage: upkg env create <name> [--backend apt|apk|dpkg|brew|nix|...]\n")
+		fmt.Fprintf(os.Stderr, "Usage: upkg env create <name> [--backend apt|apk|dpkg|brew|nix|winget|...]\n")
 		os.Exit(1)
 	}
 
@@ -450,11 +450,12 @@ func handleEnvCreate(args []string) {
 		"apt": true, "brew": true, "nix": true,
 		"dnf": true, "pacman": true, "apk": true,
 		"zypper": true, "choco": true, "dpkg": true,
+		"winget": true,
 	}
 
 	if !validBackends[backend] {
 		fmt.Fprintf(os.Stderr, "Error: invalid backend '%s'\n", backend)
-		fmt.Fprintf(os.Stderr, "Valid backends: apt, apk, dpkg, brew, nix, dnf, pacman, zypper, choco\n")
+		fmt.Fprintf(os.Stderr, "Valid backends: apt, apk, dpkg, brew, nix, dnf, pacman, zypper, choco, winget\n")
 		os.Exit(1)
 	}
 
@@ -913,6 +914,8 @@ func mapBackendName(name string) backend.BackendType {
 		return backend.BackendChoco
 	case "dpkg":
 		return backend.BackendDpkg
+	case "winget":
+		return backend.BackendWinget
 	default:
 		return backend.BackendAuto
 	}
