@@ -25,14 +25,15 @@ type PackageManager struct {
 
 // FormulaInfo contains metadata about a Homebrew formula from the JSON API
 type FormulaInfo struct {
-	Name        string                 `json:"name"`
-	FullName    string                 `json:"full_name"`
-	Description string                 `json:"desc"`
-	Homepage    string                 `json:"homepage"`
-	License     string                 `json:"license"`
-	Versions    FormulaVersions        `json:"versions"`
-	Bottle      BottleInfo             `json:"bottle"`
-	URLs        map[string]interface{} `json:"urls"`
+	Name         string                 `json:"name"`
+	FullName     string                 `json:"full_name"`
+	Description  string                 `json:"desc"`
+	Homepage     string                 `json:"homepage"`
+	License      string                 `json:"license"`
+	Versions     FormulaVersions        `json:"versions"`
+	Bottle       BottleInfo             `json:"bottle"`
+	URLs         map[string]interface{} `json:"urls"`
+	Dependencies []string               `json:"dependencies"` // Runtime dependencies
 }
 
 // FormulaVersions contains version information
@@ -49,9 +50,9 @@ type BottleInfo struct {
 
 // BottleStable contains stable bottle information
 type BottleStable struct {
-	Rebuild int                        `json:"rebuild"`
-	RootURL string                     `json:"root_url"`
-	Files   map[string]BottleFileInfo  `json:"files"`
+	Rebuild int                       `json:"rebuild"`
+	RootURL string                    `json:"root_url"`
+	Files   map[string]BottleFileInfo `json:"files"`
 }
 
 // BottleFileInfo contains information about a specific bottle file
@@ -63,18 +64,18 @@ type BottleFileInfo struct {
 
 // OCIManifest represents the OCI manifest structure
 type OCIManifest struct {
-	SchemaVersion int               `json:"schemaVersion"`
-	MediaType     string            `json:"mediaType"`
-	Manifests     []OCIPlatform     `json:"manifests"`
+	SchemaVersion int           `json:"schemaVersion"`
+	MediaType     string        `json:"mediaType"`
+	Manifests     []OCIPlatform `json:"manifests"`
 }
 
 // OCIPlatform represents a platform-specific manifest
 type OCIPlatform struct {
-	MediaType   string                 `json:"mediaType"`
-	Digest      string                 `json:"digest"`
-	Size        int                    `json:"size"`
-	Platform    PlatformInfo           `json:"platform"`
-	Annotations map[string]string      `json:"annotations"`
+	MediaType   string            `json:"mediaType"`
+	Digest      string            `json:"digest"`
+	Size        int               `json:"size"`
+	Platform    PlatformInfo      `json:"platform"`
+	Annotations map[string]string `json:"annotations"`
 }
 
 // PlatformInfo contains platform details

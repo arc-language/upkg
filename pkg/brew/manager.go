@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -16,7 +17,6 @@ import (
 	"runtime"
 	"strings"
 	"time"
-	"encoding/json"
 )
 
 // NewPackageManager creates a new Homebrew package manager
@@ -70,13 +70,11 @@ func NewPackageManager(cfg *Config) *PackageManager {
 	return pm
 }
 
-// Download downloads and installs a Homebrew package
+// Download downloads and installs a Homebrew package with dependencies
 func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) error {
 	if opts == nil || opts.Formula == "" {
 		return fmt.Errorf("Formula is required in DownloadOptions")
 	}
-
-	pm.logger.Printf("Starting download for formula: %s", opts.Formula)
 
 	// Set defaults
 	if opts.Platform == "" {
@@ -92,20 +90,30 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 		}
 	}
 
-	if opts.Extract {
+	if !opts.Extract {
 		opts.Extract = true // Default to extracting
 	}
 	if !opts.VerifyHash {
 		opts.VerifyHash = true // Default to verifying
 	}
 
-	pm.logger.Printf("Download options:")
-	pm.logger.Printf("  Formula: %s", opts.Formula)
-	pm.logger.Printf("  Version: %s", opts.Version)
-	pm.logger.Printf("  Platform: %s", opts.Platform)
-	pm.logger.Printf("  Extract: %v", opts.Extract)
-	pm.logger.Printf("  KeepArchive: %v", opts.KeepArchive)
-	pm.logger.Printf("  VerifyHash: %v", opts.VerifyHash)
+	// Track visited packages to avoid circular dependencies
+	visited := make(map[string]bool)
+
+	// Start recursive installation
+	return pm.downloadRecursive(ctx, opts, visited)
+}
+
+// downloadRecursive handles recursive dependency installation
+func (pm *PackageManager) downloadRecursive(ctx context.Context, opts *DownloadOptions, visited map[string]bool) error {
+	// Skip if already visited
+	if visited[opts.Formula] {
+		pm.logger.Printf("Skipping %s (already processed)", opts.Formula)
+		return nil
+	}
+	visited[opts.Formula] = true
+
+	pm.logger.Printf("Processing formula: %s", opts.Formula)
 
 	// 1. Get formula info from API
 	pm.logger.Printf("Step 1: Fetching formula info from API...")
@@ -121,8 +129,33 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 	pm.logger.Printf("  ✓ Formula info retrieved: %s version %s", formula.Name, version)
 	pm.logger.Printf("    Description: %s", formula.Description)
 
-	// 2. Get OCI manifest and find bottle
-	pm.logger.Printf("Step 2: Fetching OCI manifest...")
+	// 2. Install dependencies first
+	if len(formula.Dependencies) > 0 {
+		pm.logger.Printf("Step 2: Resolving %d dependencies for %s...", len(formula.Dependencies), opts.Formula)
+		for _, depName := range formula.Dependencies {
+			pm.logger.Printf("  -> Dependency: %s", depName)
+
+			// Create options for dependency
+			depOpts := &DownloadOptions{
+				Formula:     depName,
+				Version:     "", // Use latest stable version for dependencies
+				Platform:    opts.Platform,
+				Extract:     opts.Extract,
+				KeepArchive: opts.KeepArchive,
+				VerifyHash:  opts.VerifyHash,
+			}
+
+			if err := pm.downloadRecursive(ctx, depOpts, visited); err != nil {
+				// Log warning but continue, as some dependencies might be optional/pre-installed
+				pm.logger.Printf("  ⚠️  Warning: failed to install dependency %s: %v", depName, err)
+			}
+		}
+	} else {
+		pm.logger.Printf("Step 2: No dependencies required")
+	}
+
+	// 3. Get OCI manifest and find bottle
+	pm.logger.Printf("Step 3: Fetching OCI manifest for %s...", opts.Formula)
 	bottleDigest, bottleURL, sha256Hash, err := pm.getBottleInfo(ctx, opts.Formula, version, opts.Platform)
 	if err != nil {
 		return fmt.Errorf("getting bottle info: %w", err)
@@ -131,51 +164,52 @@ func (pm *PackageManager) Download(ctx context.Context, opts *DownloadOptions) e
 	pm.logger.Printf("    Digest: %s", bottleDigest)
 	pm.logger.Printf("    SHA256: %s", sha256Hash)
 
-	// 3. Download bottle
-	pm.logger.Printf("Step 3: Downloading bottle...")
-	bottlePath := filepath.Join(pm.config.InstallPath, "downloads", 
+	// 4. Download bottle
+	pm.logger.Printf("Step 4: Downloading bottle...")
+	bottlePath := filepath.Join(pm.config.InstallPath, "downloads",
 		fmt.Sprintf("%s-%s.%s.bottle.tar.gz", opts.Formula, version, opts.Platform))
-	
+
 	if err := pm.downloadBottle(ctx, bottleURL, bottlePath); err != nil {
 		return fmt.Errorf("downloading bottle: %w", err)
 	}
 	pm.logger.Printf("  ✓ Download complete")
 
-	// 4. Verify hash
+	// 5. Verify hash
 	if opts.VerifyHash && sha256Hash != "" {
-		pm.logger.Printf("Step 4: Verifying SHA256 hash...")
+		pm.logger.Printf("Step 5: Verifying SHA256 hash...")
 		if err := pm.verifyFileHash(bottlePath, sha256Hash); err != nil {
 			return fmt.Errorf("hash verification failed: %w", err)
 		}
 		pm.logger.Printf("  ✓ Hash verified")
 	} else {
-		pm.logger.Printf("Step 4: Skipping hash verification")
+		pm.logger.Printf("Step 5: Skipping hash verification")
 	}
 
-	// 5. Extract bottle
+	// 6. Extract bottle
 	if opts.Extract {
-		pm.logger.Printf("Step 5: Extracting bottle...")
+		pm.logger.Printf("Step 6: Extracting bottle...")
 		cellarPath := filepath.Join(pm.config.InstallPath, DefaultCellar)
 		if err := pm.extractBottle(bottlePath, cellarPath); err != nil {
 			return fmt.Errorf("extracting bottle: %w", err)
 		}
 		pm.logger.Printf("  ✓ Extraction complete")
 
-		// 6. Cleanup archive if requested
+		// 7. Cleanup archive if requested
 		if !opts.KeepArchive {
-			pm.logger.Printf("Step 6: Removing archive file...")
+			pm.logger.Printf("Step 7: Removing archive file...")
 			if err := os.Remove(bottlePath); err != nil {
 				pm.logger.Printf("  ⚠️  Warning: failed to remove archive: %v", err)
 			} else {
 				pm.logger.Printf("  ✓ Archive removed")
 			}
 		} else {
-			pm.logger.Printf("Step 6: Keeping archive file as requested")
+			pm.logger.Printf("Step 7: Keeping archive file as requested")
 		}
 	} else {
-		pm.logger.Printf("Step 5: Skipping extraction (Extract=false)")
+		pm.logger.Printf("Step 6: Skipping extraction (Extract=false)")
 	}
 
+	pm.logger.Printf("✓ Successfully installed %s", opts.Formula)
 	return nil
 }
 
@@ -228,7 +262,7 @@ func (pm *PackageManager) getBottleInfo(ctx context.Context, formula, version st
 
 			// Get the actual download URL
 			blobURL := fmt.Sprintf("%s/%s/blobs/sha256:%s", pm.config.RegistryURL, formula, bottleDigest)
-			
+
 			// We must manually handle the request to prevent following redirects,
 			// because the Location header is in the 307 response.
 			req, err := http.NewRequestWithContext(ctx, "HEAD", blobURL, nil)
@@ -245,7 +279,7 @@ func (pm *PackageManager) getBottleInfo(ctx context.Context, formula, version st
 				},
 				Timeout: pm.config.Timeout,
 			}
-			
+
 			headResp, err := client.Do(req)
 			if err != nil {
 				return "", "", "", fmt.Errorf("getting blob location: %w", err)
