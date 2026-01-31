@@ -122,8 +122,22 @@ func (pm *PackageManager) installRecursive(ctx context.Context, pkgRequest strin
 		reqName := cleanReqName(req)
 		
 		// Skip self-reference or known circulars
-		if reqName == pkgInfo.Name { continue }
-		if reqName == "bash" && pkgInfo.Name == "bash" { continue }
+		if reqName == pkgInfo.Name { 
+			continue 
+		}
+		
+		// Skip file-based dependencies that start with /
+		// These should be pre-satisfied in the environment
+		if strings.HasPrefix(reqName, "/") {
+			pm.logger.Printf("  -> Dependency: %s (file dependency, skipping)", reqName)
+			continue
+		}
+		
+		// Skip malformed dependencies starting with (
+		if strings.HasPrefix(reqName, "(") {
+			pm.logger.Printf("  -> Dependency: %s (malformed, skipping)", reqName)
+			continue
+		}
 
 		pm.logger.Printf("  -> Dependency: %s", reqName)
 		
@@ -187,6 +201,30 @@ func (pm *PackageManager) installRecursive(ctx context.Context, pkgRequest strin
 // resolvePackage finds a package by name OR by what it provides, preferring the target Arch
 func (pm *PackageManager) resolvePackage(name string, arch Architecture) (*PackageInfo, error) {
 	clean := cleanReqName(name)
+
+	// Skip file-based dependencies - they're usually provided by base packages
+	// already in the environment or are circular dependencies
+	if strings.HasPrefix(clean, "/") {
+		// These are file paths, not package names
+		// Check if any package provides them
+		if providers, ok := pm.cache.providers[clean]; ok && len(providers) > 0 {
+			// Prefer exact architecture match
+			for _, p := range providers {
+				if p.Architecture == string(arch) {
+					return p, nil
+				}
+			}
+			// Then noarch
+			for _, p := range providers {
+				if p.Architecture == "noarch" {
+					return p, nil
+				}
+			}
+			return providers[0], nil
+		}
+		// If not found, skip - these are often already satisfied in the environment
+		return nil, fmt.Errorf("file dependency '%s' not provided by any package", clean)
+	}
 
 	// 1. Try providers map
 	if providers, ok := pm.cache.providers[clean]; ok && len(providers) > 0 {

@@ -147,10 +147,13 @@ func ParsePrimary(r io.Reader) ([]*PackageInfo, error) {
 			}
 		}
 
-		// Parse requires
+		// Parse requires - with cleanup for malformed names
 		for _, entry := range p.Format.Requires.Entries {
 			if entry.Name != "" && !strings.HasPrefix(entry.Name, "rpmlib(") {
-				pkg.Requires = append(pkg.Requires, entry.Name)
+				// Clean up malformed dependency names (remove leading/trailing parentheses)
+				name := strings.TrimPrefix(entry.Name, "(")
+				name = strings.TrimSuffix(name, ")")
+				pkg.Requires = append(pkg.Requires, name)
 			}
 		}
 
