@@ -1,8 +1,6 @@
 // pkg/winget/types.go
 package winget
 
-import "time"
-
 // APIResponse represents a generic paginated response from winget.run
 type APIResponse[T any] struct {
 	Data       []T    `json:"Data"`
@@ -13,11 +11,11 @@ type APIResponse[T any] struct {
 
 // PackageEntry represents a package summary from the search API
 type PackageEntry struct {
-	ID          string    `json:"Id"`
-	Versions    []string  `json:"Versions"`
+	ID          string      `json:"Id"`
+	Versions    []string    `json:"Versions"`
 	Latest      VersionInfo `json:"Latest"`
-	UpdatedAt   time.Time `json:"UpdatedAt"`
-	SearchScore float64   `json:"SearchScore,omitempty"`
+	UpdatedAt   string      `json:"UpdatedAt"` // Changed to string to handle non-standard API time formats
+	SearchScore float64     `json:"SearchScore,omitempty"`
 }
 
 // VersionInfo contains metadata about a specific version
